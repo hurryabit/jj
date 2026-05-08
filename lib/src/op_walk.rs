@@ -369,7 +369,7 @@ pub async fn closest_common_ancestor(
     set1: impl IntoIterator<Item = Operation>,
     set2: impl IntoIterator<Item = Operation>,
 ) -> OpStoreResult<Operation> {
-    let ancestor_op = dag_walk_async::closest_common_node(
+    let ancestor_op = dag_walk_async::closest_common_nodes(
         set1.into_iter().map(OperationByEndTime),
         set2.into_iter().map(OperationByEndTime),
         |op: &OperationByEndTime| op.0.id().clone(),
@@ -380,6 +380,9 @@ pub async fn closest_common_ancestor(
         },
     )
     .await?
+    .into_iter()
+    // TODO: do recursive merge instead of using only a single common operation
+    .next()
     .unwrap();
     Ok(ancestor_op.0)
 }

@@ -1,0 +1,13 @@
+[package]
+name = "jj-sql-lib"
+description = "SQL backend for Jujutsu"
+
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+jj-lib = { workspace = true }

@@ -2650,6 +2650,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jj-sql-cli"
+version = "0.41.0"
+dependencies = [
+ "jj-cli",
+ "jj-sql-lib",
+]
+
+[[package]]
+name = "jj-sql-lib"
+version = "0.41.0"
+dependencies = [
+ "jj-lib",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.97"
 source = "registry+https://github.com/rust-lang/crates.io-index"

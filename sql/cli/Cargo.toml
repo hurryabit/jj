@@ -1,0 +1,18 @@
+[package]
+name = "jj-sql-cli"
+description = "CLI for Jujutsu with SQL backend"
+
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+
+[[bin]]
+name = "jj-sql"
+path = "src/main.rs"
+
+[dependencies]
+jj-cli = { path = "../../cli", version = "0.41.0", default-features = false }
+jj-sql-lib = { path = "../lib", version = "0.41.0" }

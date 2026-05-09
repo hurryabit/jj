@@ -26,6 +26,7 @@ gix = { workspace = true, features = [
 ] }
 itertools = { workspace = true }
 jj-lib = { workspace = true, features = ["testing"] }
+jj-sql-lib = { path = "../../sql/lib", version = "0.41.0" }
 pollster = { workspace = true }
 proptest = { workspace = true }
 proptest-derive = { workspace = true }

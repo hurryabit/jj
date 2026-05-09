@@ -16,7 +16,6 @@ use std::path::Path;
 
 use itertools::Itertools as _;
 use jj_lib::repo::Repo as _;
-use jj_lib::repo::StoreFactories;
 use jj_lib::workspace::Workspace;
 use jj_lib::workspace::default_working_copy_factories;
 use pollster::FutureExt as _;
@@ -104,6 +103,7 @@ fn merge_directories(left: &Path, base: &Path, right: &Path, output: &Path) {
 
 #[test_case(TestRepoBackend::Simple; "simple backend")]
 #[test_case(TestRepoBackend::Git; "git backend")]
+#[test_case(TestRepoBackend::Sql ; "sql backend")]
 fn test_bad_locking_children(backend: TestRepoBackend) -> TestResult {
     // Test that two new commits created on separate machines are both visible (not
     // lost due to lack of locking)
@@ -122,7 +122,7 @@ fn test_bad_locking_children(backend: TestRepoBackend) -> TestResult {
     let machine1_workspace = Workspace::load(
         &settings,
         &machine1_root,
-        &StoreFactories::default(),
+        &test_workspace.env.default_store_factories(),
         &default_working_copy_factories(),
     )?;
     let machine1_repo = machine1_workspace.repo_loader().load_at_head().block_on()?;
@@ -136,7 +136,7 @@ fn test_bad_locking_children(backend: TestRepoBackend) -> TestResult {
     let machine2_workspace = Workspace::load(
         &settings,
         &machine2_root,
-        &StoreFactories::default(),
+        &test_workspace.env.default_store_factories(),
         &default_working_copy_factories(),
     )?;
     let machine2_repo = machine2_workspace.repo_loader().load_at_head().block_on()?;
@@ -151,7 +151,7 @@ fn test_bad_locking_children(backend: TestRepoBackend) -> TestResult {
     let merged_workspace = Workspace::load(
         &settings,
         &merged_path,
-        &StoreFactories::default(),
+        &test_workspace.env.default_store_factories(),
         &default_working_copy_factories(),
     )?;
     let merged_repo = merged_workspace.repo_loader().load_at_head().block_on()?;
@@ -165,6 +165,7 @@ fn test_bad_locking_children(backend: TestRepoBackend) -> TestResult {
 
 #[test_case(TestRepoBackend::Simple ; "simple backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
+#[test_case(TestRepoBackend::Sql ; "sql backend")]
 fn test_bad_locking_interrupted(backend: TestRepoBackend) -> TestResult {
     // Test that an interrupted update of the op-heads resulting in on op-head
     // that's a descendant of the other is resolved without creating a new

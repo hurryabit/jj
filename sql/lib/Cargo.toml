@@ -10,4 +10,22 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
+async-trait = { workspace = true }
+balsaq = { path = "../../../balsaq"}
+blake2 = { workspace = true }
+clru = { workspace = true }
+const_format = "0.2.36"
+futures = { workspace = true }
+itertools = { workspace = true }
 jj-lib = { workspace = true }
+pollster = { workspace = true }
+rusqlite = "0.39.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd = "0.13.3"
+
+[dev-dependencies]
+insta = { workspace = true }
+tempfile = { workspace = true }

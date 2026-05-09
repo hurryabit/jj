@@ -144,6 +144,7 @@ fn test_root() -> TestResult {
 
 #[test_case(TestRepoBackend::Simple ; "simple backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
+#[test_case(TestRepoBackend::Sql ; "sql backend")]
 fn test_checkout_file_transitions(backend: TestRepoBackend) -> TestResult {
     // Tests switching between commits where a certain path is of one type in one
     // commit and another type in the other. Includes a "missing" type, so we cover

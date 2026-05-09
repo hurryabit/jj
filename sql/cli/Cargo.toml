@@ -14,5 +14,7 @@ name = "jj-sql"
 path = "src/main.rs"
 
 [dependencies]
+clap = { workspace = true }
 jj-cli = { path = "../../cli", version = "0.41.0", default-features = false }
+jj-lib = { workspace = true }
 jj-sql-lib = { path = "../lib", version = "0.41.0" }

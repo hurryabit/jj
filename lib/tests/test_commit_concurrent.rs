@@ -55,6 +55,7 @@ fn count_non_merge_operations(repo: &Arc<ReadonlyRepo>) -> usize {
 
 #[test_case(TestRepoBackend::Simple ; "simple backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
+#[test_case(TestRepoBackend::Sql ; "sql backend")]
 fn test_commit_parallel(backend: TestRepoBackend) -> TestResult {
     // This loads a Repo instance and creates and commits many concurrent
     // transactions from it. It then reloads the repo. That should merge all the
@@ -86,6 +87,7 @@ fn test_commit_parallel(backend: TestRepoBackend) -> TestResult {
 
 #[test_case(TestRepoBackend::Simple ; "simple backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
+#[test_case(TestRepoBackend::Sql ; "sql backend")]
 fn test_commit_parallel_instances(backend: TestRepoBackend) -> TestResult {
     // Like the test above but creates a new repo instance for every thread, which
     // makes it behave very similar to separate processes.

@@ -74,6 +74,7 @@ use jj_lib::working_copy::SnapshotError;
 use jj_lib::working_copy::SnapshotOptions;
 use jj_lib::working_copy::SnapshotStats;
 use jj_lib::workspace::Workspace;
+use jj_sql_lib::SqlBackend;
 use pollster::FutureExt as _;
 use tempfile::TempDir;
 
@@ -209,6 +210,10 @@ impl TestEnvironment {
                 Ok(Box::new(SecretBackend::load(settings, store_path)?))
             }),
         );
+        factories.add_backend(
+            SqlBackend::name(),
+            Box::new(|settings, store_path| Ok(Box::new(SqlBackend::load(settings, store_path)?))),
+        );
         factories
     }
 
@@ -235,6 +240,7 @@ pub struct TestRepo {
 pub enum TestRepoBackend {
     Git,
     Simple,
+    Sql,
     Test,
 }
 
@@ -248,6 +254,7 @@ impl TestRepoBackend {
         match self {
             Self::Git => Ok(Box::new(GitBackend::init_internal(settings, store_path)?)),
             Self::Simple => Ok(Box::new(SimpleBackend::init(store_path))),
+            Self::Sql => Ok(Box::new(SqlBackend::init(settings, store_path)?)),
             Self::Test => Ok(Box::new(env.test_backend_factory.init(store_path))),
         }
     }

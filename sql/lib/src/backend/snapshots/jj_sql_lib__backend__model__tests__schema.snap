@@ -1,0 +1,84 @@
+---
+source: sql/lib/src/backend/model.rs
+expression: SCHEMA
+---
+CREATE TABLE IF NOT EXISTS files (
+    id BLOB NOT NULL,
+    content BLOB NOT NULL,
+    uncompressed_size INTEGER NOT NULL,
+    simhash INTEGER NOT NULL,
+    __last_written_ms INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+    PRIMARY KEY (id)
+);
+CREATE TABLE IF NOT EXISTS symlinks (
+    id BLOB NOT NULL,
+    target TEXT NOT NULL,
+    __last_written_ms INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+    PRIMARY KEY (id)
+);
+CREATE TABLE IF NOT EXISTS trees (
+    id BLOB NOT NULL,
+    __last_written_ms INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+    PRIMARY KEY (id)
+);
+CREATE TABLE IF NOT EXISTS tree_entries (
+    tree_id BLOB NOT NULL,
+    name TEXT NOT NULL,
+    value_kind INTEGER CHECK (value_kind IN (0, 1, 2, 3, 4)) NOT NULL,
+    value_id BLOB NOT NULL,
+    value_copy_id BLOB,
+    PRIMARY KEY (tree_id, name)
+);
+CREATE TABLE IF NOT EXISTS commits (
+    id BLOB NOT NULL,
+    change_id BLOB NOT NULL,
+    description TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    author_email TEXT NOT NULL,
+    author_timestamp INTEGER NOT NULL,
+    author_tz_offset INTEGER NOT NULL,
+    committer_name TEXT NOT NULL,
+    committer_email TEXT NOT NULL,
+    committer_timestamp INTEGER NOT NULL,
+    committer_tz_offset INTEGER NOT NULL,
+    secure_sig_data BLOB,
+    secure_sig_sig BLOB,
+    __last_written_ms INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+    PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS idx_commits_change_id ON commits (change_id);
+CREATE TABLE IF NOT EXISTS commit_root_trees (
+    commit_id BLOB NOT NULL,
+    position INTEGER NOT NULL,
+    tree_id BLOB NOT NULL,
+    conflict_label TEXT NOT NULL,
+    PRIMARY KEY (commit_id, position)
+);
+CREATE TABLE IF NOT EXISTS commit_parents (
+    commit_id BLOB NOT NULL,
+    position INTEGER NOT NULL,
+    parent_id BLOB NOT NULL,
+    PRIMARY KEY (commit_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_commit_parents_parent_id ON commit_parents (parent_id);
+CREATE TABLE IF NOT EXISTS commit_predecessors (
+    commit_id BLOB NOT NULL,
+    position INTEGER NOT NULL,
+    predecessor_id BLOB NOT NULL,
+    PRIMARY KEY (commit_id, position)
+);
+CREATE TABLE IF NOT EXISTS copies (
+    id BLOB NOT NULL,
+    generation INTEGER NOT NULL,
+    current_path TEXT NOT NULL,
+    salt BLOB NOT NULL,
+    __last_written_ms INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+    PRIMARY KEY (id)
+);
+CREATE TABLE IF NOT EXISTS copy_parents (
+    copy_id BLOB NOT NULL,
+    position INTEGER NOT NULL,
+    parent_id BLOB NOT NULL,
+    PRIMARY KEY (copy_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_copy_parents_parent_id ON copy_parents (parent_id);

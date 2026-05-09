@@ -23,6 +23,7 @@ use crate::common::TestEnvironment;
 
 #[test_case(TestRepoBackend::Simple ; "simple backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
+#[test_case(TestRepoBackend::Sql ; "sql backend")]
 fn test_root(backend: TestRepoBackend) -> TestResult {
     let test_env = TestEnvironment::default();
     let test_workspace = TestWorkspace::init_with_backend(backend);

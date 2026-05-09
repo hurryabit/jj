@@ -1,0 +1,24 @@
+---
+source: sql/lib/src/op_store/model.rs
+expression: SCHEMA
+---
+CREATE TABLE IF NOT EXISTS views (
+    id BLOB NOT NULL,
+    data TEXT NOT NULL,
+    __last_written_ms INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+    PRIMARY KEY (id)
+);
+CREATE TABLE IF NOT EXISTS operations (
+    id BLOB NOT NULL,
+    view_id BLOB NOT NULL,
+    metadata TEXT NOT NULL,
+    commit_predecessors TEXT,
+    __last_written_ms INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+    PRIMARY KEY (id)
+);
+CREATE TABLE IF NOT EXISTS operation_parents (
+    operation_id BLOB NOT NULL,
+    position INTEGER NOT NULL,
+    parent_id BLOB NOT NULL,
+    PRIMARY KEY (operation_id, position)
+);

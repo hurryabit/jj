@@ -15,6 +15,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+futures = { workspace = true }
+gix = { workspace = true }
+indicatif = "0.18.4"
 jj-cli = { path = "../../cli", version = "0.41.0", default-features = false }
-jj-lib = { workspace = true }
+jj-lib = { workspace = true, features = ["git"] }
 jj-sql-lib = { path = "../lib", version = "0.41.0" }

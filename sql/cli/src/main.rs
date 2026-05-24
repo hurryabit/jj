@@ -1,6 +1,11 @@
+mod import_git;
+
+use std::path::PathBuf;
+
 use jj_cli::cli_util::CliRunner;
 use jj_cli::cli_util::CommandHelper;
 use jj_cli::command_error::CommandError;
+use jj_cli::command_error::internal_error;
 use jj_cli::ui::Ui;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::ReadonlyRepo;
@@ -29,7 +34,16 @@ struct SqlArgs {
 #[derive(clap::Subcommand, Clone, Debug)]
 enum SqlSubcommand {
     /// Initialize a new workspace backed by a SQL (SQLite) database.
-    Init,
+    Init(InitArgs),
+    /// Import all commits from a git repository into a new SQL-backed
+    /// workspace.
+    GitImport(import_git::ImportGitArgs),
+}
+
+#[derive(clap::Args, Clone, Debug)]
+struct InitArgs {
+    /// Directory to initialize (default: current directory).
+    path: Option<PathBuf>,
 }
 
 fn create_store_factories() -> StoreFactories {
@@ -61,9 +75,18 @@ async fn run_sql_command(
 ) -> Result<(), CommandError> {
     match command {
         SqlCommand::Sql(SqlArgs {
-            command: SqlSubcommand::Init,
+            command: SqlSubcommand::GitImport(args),
+        }) => import_git::run(command_helper.settings(), command_helper.cwd(), &args)
+            .await
+            .map_err(internal_error),
+        SqlCommand::Sql(SqlArgs {
+            command: SqlSubcommand::Init(args),
         }) => {
-            let wc_path = command_helper.cwd();
+            let wc_path = match &args.path {
+                Some(p) => p.as_path(),
+                None => command_helper.cwd(),
+            };
+            std::fs::create_dir_all(wc_path)?;
             let settings = command_helper.settings_for_new_workspace(ui, wc_path)?.0;
             Workspace::init_with_factories(
                 &settings,

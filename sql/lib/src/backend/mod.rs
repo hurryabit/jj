@@ -1,5 +1,6 @@
 mod convert;
 pub mod model;
+mod stats;
 
 use std::fmt::Debug;
 use std::io::Write as _;
@@ -52,6 +53,8 @@ use jj_lib::settings::UserSettings;
 use pollster::FutureExt as _;
 use rusqlite::Connection;
 
+pub use self::stats::DbTableStats;
+pub use self::stats::Stats;
 use crate::convert::JjExt;
 use crate::convert::ModelExt as _;
 use crate::error::SqlBackendError;

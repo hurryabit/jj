@@ -6,7 +6,9 @@ mod op_heads_store;
 mod op_store;
 mod simhash;
 
+pub use crate::backend::DbTableStats;
 pub use crate::backend::SqlBackend;
+pub use crate::backend::Stats;
 pub use crate::op_heads_store::SqlOpHeadsStore;
 pub use crate::op_store::SqlOpStore;
 

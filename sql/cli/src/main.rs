@@ -1,7 +1,9 @@
 mod import_git;
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
+use bytesize::ByteSize;
 use jj_cli::cli_util::CliRunner;
 use jj_cli::cli_util::CommandHelper;
 use jj_cli::command_error::CommandError;
@@ -9,6 +11,7 @@ use jj_cli::command_error::internal_error;
 use jj_cli::ui::Ui;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::ReadonlyRepo;
+use jj_lib::repo::Repo as _;
 use jj_lib::repo::StoreFactories;
 use jj_lib::signing::Signer;
 use jj_lib::workspace::Workspace;
@@ -38,6 +41,15 @@ enum SqlSubcommand {
     /// Import all commits from a git repository into a new SQL-backed
     /// workspace.
     GitImport(import_git::ImportGitArgs),
+    /// Print statistics about the current repository.
+    Stats(StatsArgs),
+}
+
+#[derive(clap::Args, Clone, Debug)]
+struct StatsArgs {
+    /// Also print per-table storage statistics from the SQLite dbstat table.
+    #[arg(long)]
+    db: bool,
 }
 
 #[derive(clap::Args, Clone, Debug)]
@@ -68,12 +80,72 @@ fn create_store_factories() -> StoreFactories {
     store_factories
 }
 
+async fn run_stats(
+    ui: &mut Ui,
+    command_helper: &CommandHelper,
+    args: &StatsArgs,
+) -> Result<(), CommandError> {
+    let workspace = command_helper.workspace_helper(ui).await?;
+    let Some(backend) = workspace.repo().store().backend_impl::<SqlBackend>() else {
+        return Err(internal_error("not a SQL-backed repository"));
+    };
+    let stats = backend.stats().map_err(internal_error)?;
+    writeln!(ui.stdout(), "Commits:              {:>12}", stats.commits)?;
+    writeln!(ui.stdout(), "Trees:                {:>12}", stats.trees)?;
+    writeln!(ui.stdout(), "Blobs:                {:>12}", stats.blobs)?;
+    writeln!(
+        ui.stdout(),
+        "Blob compressed:      {:>12}",
+        ByteSize(stats.blob_compressed_bytes as u64),
+    )?;
+    writeln!(
+        ui.stdout(),
+        "Blob uncompressed:    {:>12}",
+        ByteSize(stats.blob_uncompressed_bytes as u64),
+    )?;
+    writeln!(
+        ui.stdout(),
+        "DB size on disk:      {:>12}",
+        ByteSize(stats.db_size_bytes),
+    )?;
+    if args.db {
+        let db_stats = backend.db_stats().map_err(internal_error)?;
+        let name_width = db_stats
+            .iter()
+            .map(|r| r.name.len())
+            .max()
+            .unwrap_or(0)
+            .max("Table".len());
+        writeln!(ui.stdout())?;
+        writeln!(
+            ui.stdout(),
+            "{:<name_width$} {:>12}  {:>10}  {:>10}",
+            "Table", "Payload", "Rows", "Cells",
+        )?;
+        writeln!(ui.stdout(), "{}", "-".repeat(name_width + 40))?;
+        for row in &db_stats {
+            writeln!(
+                ui.stdout(),
+                "{:<name_width$} {:>12}  {:>10}  {:>10}",
+                row.name,
+                ByteSize(row.payload_bytes as u64),
+                row.rows,
+                row.cells,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 async fn run_sql_command(
     ui: &mut Ui,
     command_helper: &CommandHelper,
     command: SqlCommand,
 ) -> Result<(), CommandError> {
     match command {
+        SqlCommand::Sql(SqlArgs {
+            command: SqlSubcommand::Stats(args),
+        }) => run_stats(ui, command_helper, &args).await,
         SqlCommand::Sql(SqlArgs {
             command: SqlSubcommand::GitImport(args),
         }) => import_git::run(command_helper.settings(), command_helper.cwd(), &args)

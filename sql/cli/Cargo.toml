@@ -14,6 +14,7 @@ name = "jj-sql"
 path = "src/main.rs"
 
 [dependencies]
+bytesize = "1"
 clap = { workspace = true }
 futures = { workspace = true }
 gix = { workspace = true }

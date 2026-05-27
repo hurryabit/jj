@@ -1,10 +1,6 @@
-use std::convert::TryFrom;
-
 use balsaq::ConnectionExt as _;
 use balsaq::Model as _;
 use rusqlite::Connection;
-
-use crate::hash::Hash;
 use crate::id_newtype;
 
 pub const COMMIT_ID_LENGTH: usize = 64;
@@ -35,9 +31,9 @@ mod schema {
         pub sig: Vec<u8>,
     }
 
-    #[balsaq::table("files", track_last_update)]
+    #[balsaq::table("files", auto_primary_key, track_last_update)]
     pub struct File {
-        #[primary_key]
+        #[unique]
         pub id: FileId,
         pub content: Vec<u8>,
         pub uncompressed_size: i64,
@@ -46,138 +42,36 @@ mod schema {
         pub simhash: i64,
     }
 
-    #[balsaq::table("symlinks", track_last_update)]
+    #[balsaq::table("symlinks", auto_primary_key, track_last_update)]
     pub struct Symlink {
-        #[primary_key]
+        #[unique]
         pub id: SymlinkId,
         pub target: String,
     }
 
-    #[balsaq::table("trees", track_last_update)]
+    #[balsaq::table("trees", auto_primary_key, track_last_update)]
     pub struct Tree {
-        #[primary_key]
+        #[unique]
         pub id: TreeId,
+        pub entries: Vec<u8>,
     }
 
-    impl Tree {
-        /// Returns `Ok(())` if the tree exists, or `Err(QueryReturnedNoRows)`
-        /// if not.
-        pub fn exists(conn: &Connection, id: &TreeId) -> rusqlite::Result<()> {
-            conn.prepare_cached("SELECT 1 FROM trees WHERE id = ?1")?
-                .query_row((id,), |_| Ok(()))
-        }
-    }
-
-    pub enum TreeValue {
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub enum TreeEntryValue {
         File {
-            file_id: FileId,
+            row_id: i64,
             executable: bool,
             copy_id: Option<CopyId>,
         },
-        Symlink(SymlinkId),
-        Tree(TreeId),
-        Submodule(CommitId),
+        Symlink(i64),
+        Tree(i64),
+        Submodule(i64),
     }
 
-    #[repr(i64)]
-    #[derive(balsaq::Column, Clone, Copy)]
-    enum NodeKind {
-        File = 0,
-        ExecutableFile = 1,
-        Symlink = 2,
-        Tree = 3,
-        Submodule = 4,
-    }
-
-    #[balsaq::group]
-    struct TreeValueRaw {
-        kind: NodeKind,
-        id: Hash<COMMIT_ID_LENGTH>,
-        copy_id: Option<CopyId>,
-    }
-
-    impl TryFrom<TreeValueRaw> for TreeValue {
-        type Error = rusqlite::Error;
-
-        fn try_from(raw: TreeValueRaw) -> rusqlite::Result<Self> {
-            Ok(match raw.kind {
-                NodeKind::File => TreeValue::File {
-                    file_id: FileId(raw.id),
-                    executable: false,
-                    copy_id: raw.copy_id,
-                },
-                NodeKind::ExecutableFile => TreeValue::File {
-                    file_id: FileId(raw.id),
-                    executable: true,
-                    copy_id: raw.copy_id,
-                },
-                NodeKind::Symlink => TreeValue::Symlink(SymlinkId(raw.id)),
-                NodeKind::Tree => TreeValue::Tree(TreeId(raw.id)),
-                NodeKind::Submodule => TreeValue::Submodule(CommitId(raw.id)),
-            })
-        }
-    }
-
-    impl From<TreeValue> for TreeValueRaw {
-        fn from(v: TreeValue) -> Self {
-            match v {
-                TreeValue::File {
-                    file_id,
-                    executable,
-                    copy_id,
-                } => TreeValueRaw {
-                    kind: if executable {
-                        NodeKind::ExecutableFile
-                    } else {
-                        NodeKind::File
-                    },
-                    id: file_id.0,
-                    copy_id,
-                },
-                TreeValue::Symlink(id) => TreeValueRaw {
-                    kind: NodeKind::Symlink,
-                    id: id.0,
-                    copy_id: None,
-                },
-                TreeValue::Tree(id) => TreeValueRaw {
-                    kind: NodeKind::Tree,
-                    id: id.0,
-                    copy_id: None,
-                },
-                TreeValue::Submodule(id) => TreeValueRaw {
-                    kind: NodeKind::Submodule,
-                    id: id.0,
-                    copy_id: None,
-                },
-            }
-        }
-    }
-
-    #[balsaq::table("tree_entries")]
-    pub struct TreeEntry {
-        #[primary_key]
-        pub tree_id: TreeId,
-        #[primary_key]
-        pub name: String,
-        #[group(via = TreeValueRaw)]
-        pub value: TreeValue,
-    }
-
-    impl TreeEntry {
-        pub fn get_all_for_tree(
-            conn: &Connection,
-            tree_id: &TreeId,
-        ) -> rusqlite::Result<Vec<Self>> {
-            const SQL: &str =
-                const_format::concatcp!(TreeEntry::SELECT, " WHERE tree_id = ?1 ORDER BY name");
-            conn.get_all(SQL, (tree_id,))
-        }
-    }
-
-    #[balsaq::table("commits", track_last_update)]
+    #[balsaq::table("commits", auto_primary_key, track_last_update)]
     #[index(change_id)]
     pub struct Commit {
-        #[primary_key]
+        #[unique]
         pub id: CommitId,
         pub change_id: ChangeId,
         pub description: String,
@@ -292,6 +186,16 @@ mod schema {
 
 pub use schema::*;
 
+pub type TreeEntries = Vec<(String, TreeEntryValue)>;
+
+pub fn encode_tree_entries(entries: &TreeEntries) -> Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(entries)
+}
+
+pub fn decode_tree_entries(bytes: &[u8]) -> Result<TreeEntries, postcard::Error> {
+    postcard::from_bytes(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use insta::assert_snapshot;
@@ -329,182 +233,91 @@ mod tests {
         ChangeId(Hash([b; CHANGE_ID_LENGTH]))
     }
 
+    fn insert_file(conn: &Connection, id: FileId) -> FileRowId {
+        conn.insert(File {
+            id,
+            content: vec![],
+            uncompressed_size: 0,
+            simhash: 0,
+        })
+        .unwrap()
+    }
+
+    fn insert_symlink(conn: &Connection, id: SymlinkId) -> SymlinkRowId {
+        conn.insert(Symlink {
+            id,
+            target: "target".to_owned(),
+        })
+        .unwrap()
+    }
+
+    fn insert_tree(conn: &Connection, id: TreeId, entries: TreeEntries) -> TreeRowId {
+        let blob = encode_tree_entries(&entries).unwrap();
+        conn.insert(Tree { id, entries: blob }).unwrap()
+    }
+
     #[test]
     fn tree_roundtrip() {
         let conn = setup();
-        conn.insert(Tree { id: tid(3) }).unwrap();
-        Tree::exists(&conn, &tid(3)).unwrap();
-        assert!(Tree::exists(&conn, &tid(99)).is_err());
-    }
-
-    fn make_node(tree: TreeId, name: &str, value: TreeValue) -> TreeEntry {
-        TreeEntry {
-            tree_id: tree,
-            name: name.to_owned(),
-            value,
-        }
+        insert_tree(&conn, tid(3), TreeEntries::new());
+        assert!(Tree::get_by_id(&conn, &tid(3)).is_ok());
+        assert!(Tree::get_by_id(&conn, &tid(99)).is_err());
     }
 
     #[test]
-    fn node_file_non_executable_no_copy_id() {
+    fn tree_entries_roundtrip() {
         let conn = setup();
-        let tree = tid(1);
-        conn.insert(make_node(
-            tree,
-            "a.txt",
-            TreeValue::File {
-                file_id: fid(2),
-                executable: false,
-                copy_id: None,
-            },
-        ))
-        .unwrap();
-        let rows = TreeEntry::get_all_for_tree(&conn, &tree).unwrap();
-        assert_eq!(rows.len(), 1);
-        match rows[0].value {
-            TreeValue::File {
-                file_id,
-                executable,
-                copy_id,
-            } => {
-                assert_eq!(file_id, fid(2));
-                assert!(!executable);
-                assert!(copy_id.is_none());
-            }
-            _ => panic!("expected File"),
-        }
+        let f_row = insert_file(&conn, fid(2));
+        let s_row = insert_symlink(&conn, sid(4));
+        let sub_row = insert_tree(&conn, tid(5), TreeEntries::new());
+        let entries = vec![
+            (
+                "a.txt".to_owned(),
+                TreeEntryValue::File {
+                    row_id: f_row.0,
+                    executable: false,
+                    copy_id: None,
+                },
+            ),
+            (
+                "link".to_owned(),
+                TreeEntryValue::Symlink(s_row.0),
+            ),
+            (
+                "subdir".to_owned(),
+                TreeEntryValue::Tree(sub_row.0),
+            ),
+        ];
+        insert_tree(&conn, tid(1), entries.clone());
+        let (_, tree) = Tree::get_by_id(&conn, &tid(1)).unwrap();
+        let decoded = decode_tree_entries(&tree.entries).unwrap();
+        assert_eq!(decoded, entries);
     }
 
     #[test]
-    fn node_file_non_executable_with_copy_id() {
+    fn tree_entries_all_variants() {
         let conn = setup();
-        let tree = tid(1);
-        conn.insert(make_node(
-            tree,
-            "a.txt",
-            TreeValue::File {
-                file_id: fid(2),
-                executable: false,
-                copy_id: Some(cpid(5)),
-            },
-        ))
-        .unwrap();
-        let rows = TreeEntry::get_all_for_tree(&conn, &tree).unwrap();
-        match rows[0].value {
-            TreeValue::File {
-                file_id,
-                executable,
-                copy_id,
-            } => {
-                assert_eq!(file_id, fid(2));
-                assert!(!executable);
-                assert_eq!(copy_id, Some(cpid(5)));
-            }
-            _ => panic!("expected File"),
-        }
-    }
+        let f_row = insert_file(&conn, fid(2));
+        let s_row = insert_symlink(&conn, sid(4));
+        let sub_row = insert_tree(&conn, tid(5), TreeEntries::new());
+        let c_row = conn.insert(make_commit(cid(6))).unwrap();
 
-    #[test]
-    fn node_file_executable_no_copy_id() {
-        let conn = setup();
-        let tree = tid(1);
-        conn.insert(make_node(
-            tree,
-            "run.sh",
-            TreeValue::File {
-                file_id: fid(3),
-                executable: true,
-                copy_id: None,
-            },
-        ))
-        .unwrap();
-        let rows = TreeEntry::get_all_for_tree(&conn, &tree).unwrap();
-        match rows[0].value {
-            TreeValue::File {
-                file_id,
-                executable,
-                copy_id,
-            } => {
-                assert_eq!(file_id, fid(3));
-                assert!(executable);
-                assert!(copy_id.is_none());
-            }
-            _ => panic!("expected File"),
-        }
-    }
-
-    #[test]
-    fn node_file_executable_with_copy_id() {
-        let conn = setup();
-        let tree = tid(1);
-        conn.insert(make_node(
-            tree,
-            "run.sh",
-            TreeValue::File {
-                file_id: fid(3),
-                executable: true,
-                copy_id: Some(cpid(7)),
-            },
-        ))
-        .unwrap();
-        let rows = TreeEntry::get_all_for_tree(&conn, &tree).unwrap();
-        match rows[0].value {
-            TreeValue::File {
-                file_id,
-                executable,
-                copy_id,
-            } => {
-                assert_eq!(file_id, fid(3));
-                assert!(executable);
-                assert_eq!(copy_id, Some(cpid(7)));
-            }
-            _ => panic!("expected File"),
-        }
-    }
-
-    #[test]
-    fn node_symlink() {
-        let conn = setup();
-        let tree = tid(1);
-        conn.insert(make_node(tree, "link", TreeValue::Symlink(sid(4))))
-            .unwrap();
-        let rows = TreeEntry::get_all_for_tree(&conn, &tree).unwrap();
-        assert!(matches!(rows[0].value, TreeValue::Symlink(id) if id == sid(4)));
-    }
-
-    #[test]
-    fn node_tree() {
-        let conn = setup();
-        let tree = tid(1);
-        conn.insert(make_node(tree, "subdir", TreeValue::Tree(tid(5))))
-            .unwrap();
-        let rows = TreeEntry::get_all_for_tree(&conn, &tree).unwrap();
-        assert!(matches!(rows[0].value, TreeValue::Tree(id) if id == tid(5)));
-    }
-
-    #[test]
-    fn node_submodule() {
-        let conn = setup();
-        let tree = tid(1);
-        conn.insert(make_node(tree, "sub", TreeValue::Submodule(cid(6))))
-            .unwrap();
-        let rows = TreeEntry::get_all_for_tree(&conn, &tree).unwrap();
-        assert!(matches!(rows[0].value, TreeValue::Submodule(id) if id == cid(6)));
-    }
-
-    #[test]
-    fn node_get_all_sorted_by_name() {
-        let conn = setup();
-        let tree = tid(1);
-        conn.insert(make_node(tree, "z.txt", TreeValue::Symlink(sid(1))))
-            .unwrap();
-        conn.insert(make_node(tree, "a.txt", TreeValue::Symlink(sid(2))))
-            .unwrap();
-        conn.insert(make_node(tree, "m.txt", TreeValue::Symlink(sid(3))))
-            .unwrap();
-        let rows = TreeEntry::get_all_for_tree(&conn, &tree).unwrap();
-        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, ["a.txt", "m.txt", "z.txt"]);
+        let entries = vec![
+            (
+                "exec.sh".to_owned(),
+                TreeEntryValue::File {
+                    row_id: f_row.0,
+                    executable: true,
+                    copy_id: Some(cpid(9)),
+                },
+            ),
+            ("link".to_owned(), TreeEntryValue::Symlink(s_row.0)),
+            ("subdir".to_owned(), TreeEntryValue::Tree(sub_row.0)),
+            ("sub".to_owned(), TreeEntryValue::Submodule(c_row.0)),
+        ];
+        let blob = encode_tree_entries(&entries).unwrap();
+        let decoded = decode_tree_entries(&blob).unwrap();
+        assert_eq!(decoded, entries);
     }
 
     fn make_commit(id: CommitId) -> Commit {

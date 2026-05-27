@@ -15,6 +15,8 @@ pub enum SqlBackendError {
     SqlError(#[from] rusqlite::Error),
     #[error("JSON error")]
     JsonError(#[from] serde_json::Error),
+    #[error("Encoding error")]
+    EncodingError(#[from] postcard::Error),
     #[error(
         "Invalid hash length for object of type {object_type} (expected {expected} bytes, got \
          {actual} bytes): {hash}"

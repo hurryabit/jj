@@ -8,7 +8,6 @@ use jj_lib::backend::Signature;
 use jj_lib::backend::SymlinkId;
 use jj_lib::backend::Timestamp;
 use jj_lib::backend::TreeId;
-use jj_lib::backend::TreeValue;
 use jj_lib::object_id::ObjectId as _;
 
 use super::model;
@@ -68,47 +67,3 @@ impl ModelExt for model::SecureSig {
     type Jj = SecureSig;
 }
 
-impl JjExt for TreeValue {
-    type Model = model::TreeValue;
-    fn to_model(&self) -> Result<Self::Model, SqlBackendError> {
-        Ok(match self {
-            TreeValue::File {
-                id,
-                executable,
-                copy_id,
-            } => model::TreeValue::File {
-                file_id: id.to_model()?,
-                executable: *executable,
-                copy_id: if copy_id.as_bytes().is_empty() {
-                    None
-                } else {
-                    Some(copy_id.to_model()?)
-                },
-            },
-            TreeValue::Symlink(id) => model::TreeValue::Symlink(id.to_model()?),
-            TreeValue::Tree(id) => model::TreeValue::Tree(id.to_model()?),
-            TreeValue::GitSubmodule(id) => model::TreeValue::Submodule(id.to_model()?),
-        })
-    }
-    fn from_model(model: Self::Model) -> Self {
-        match model {
-            model::TreeValue::File {
-                file_id,
-                executable,
-                copy_id,
-            } => TreeValue::File {
-                id: file_id.into_jj(),
-                executable,
-                copy_id: copy_id
-                    .map(|id| id.into_jj())
-                    .unwrap_or_else(CopyId::placeholder),
-            },
-            model::TreeValue::Symlink(id) => TreeValue::Symlink(id.into_jj()),
-            model::TreeValue::Tree(id) => TreeValue::Tree(id.into_jj()),
-            model::TreeValue::Submodule(id) => TreeValue::GitSubmodule(id.into_jj()),
-        }
-    }
-}
-impl ModelExt for model::TreeValue {
-    type Jj = TreeValue;
-}

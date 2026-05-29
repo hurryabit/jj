@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS files (
     id BLOB NOT NULL UNIQUE,
     content BLOB NOT NULL,
     uncompressed_size INTEGER NOT NULL,
-    simhash INTEGER NOT NULL,
+    simhash INTEGER,
     __last_written_ms INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
 );
 CREATE TABLE IF NOT EXISTS symlinks (

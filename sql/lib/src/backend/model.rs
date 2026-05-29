@@ -1,6 +1,7 @@
 use balsaq::ConnectionExt as _;
 use balsaq::Model as _;
 use rusqlite::Connection;
+
 use crate::id_newtype;
 
 pub const COMMIT_ID_LENGTH: usize = 64;
@@ -39,7 +40,7 @@ mod schema {
         pub uncompressed_size: i64,
         /// SimHash fingerprint of the uncompressed content, used to find
         /// delta-compression base candidates by Hamming distance.
-        pub simhash: i64,
+        pub simhash: Option<i64>,
     }
 
     #[balsaq::table("symlinks", auto_primary_key, track_last_update)]
@@ -57,15 +58,15 @@ mod schema {
     }
 
     #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-    pub enum TreeEntryValue {
+    pub enum TreeValue {
         File {
-            row_id: i64,
+            row_id: FileRowId,
             executable: bool,
             copy_id: Option<CopyId>,
         },
-        Symlink(i64),
-        Tree(i64),
-        Submodule(i64),
+        Symlink(SymlinkRowId),
+        Tree(TreeRowId),
+        Submodule(CommitRowId),
     }
 
     #[balsaq::table("commits", auto_primary_key, track_last_update)]
@@ -186,7 +187,7 @@ mod schema {
 
 pub use schema::*;
 
-pub type TreeEntries = Vec<(String, TreeEntryValue)>;
+pub type TreeEntries = Vec<(String, TreeValue)>;
 
 pub fn encode_tree_entries(entries: &TreeEntries) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(entries)
@@ -238,7 +239,7 @@ mod tests {
             id,
             content: vec![],
             uncompressed_size: 0,
-            simhash: 0,
+            simhash: None,
         })
         .unwrap()
     }
@@ -273,20 +274,14 @@ mod tests {
         let entries = vec![
             (
                 "a.txt".to_owned(),
-                TreeEntryValue::File {
-                    row_id: f_row.0,
+                TreeValue::File {
+                    row_id: f_row,
                     executable: false,
                     copy_id: None,
                 },
             ),
-            (
-                "link".to_owned(),
-                TreeEntryValue::Symlink(s_row.0),
-            ),
-            (
-                "subdir".to_owned(),
-                TreeEntryValue::Tree(sub_row.0),
-            ),
+            ("link".to_owned(), TreeValue::Symlink(s_row)),
+            ("subdir".to_owned(), TreeValue::Tree(sub_row)),
         ];
         insert_tree(&conn, tid(1), entries.clone());
         let (_, tree) = Tree::get_by_id(&conn, &tid(1)).unwrap();
@@ -305,15 +300,15 @@ mod tests {
         let entries = vec![
             (
                 "exec.sh".to_owned(),
-                TreeEntryValue::File {
-                    row_id: f_row.0,
+                TreeValue::File {
+                    row_id: f_row,
                     executable: true,
                     copy_id: Some(cpid(9)),
                 },
             ),
-            ("link".to_owned(), TreeEntryValue::Symlink(s_row.0)),
-            ("subdir".to_owned(), TreeEntryValue::Tree(sub_row.0)),
-            ("sub".to_owned(), TreeEntryValue::Submodule(c_row.0)),
+            ("link".to_owned(), TreeValue::Symlink(s_row)),
+            ("subdir".to_owned(), TreeValue::Tree(sub_row)),
+            ("sub".to_owned(), TreeValue::Submodule(c_row)),
         ];
         let blob = encode_tree_entries(&entries).unwrap();
         let decoded = decode_tree_entries(&blob).unwrap();

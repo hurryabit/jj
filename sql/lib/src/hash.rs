@@ -1,7 +1,8 @@
 use jj_lib::hex_util::decode_hex;
 use jj_lib::hex_util::encode_hex;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, zerocopy::IntoBytes, zerocopy::Immutable)]
+#[repr(transparent)]
 pub struct Hash<const N: usize>(pub [u8; N]);
 
 impl<const N: usize> rusqlite::ToSql for Hash<N> {

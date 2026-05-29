@@ -20,11 +20,12 @@ itertools = { workspace = true }
 jj-lib = { workspace = true }
 postcard = { version = "1", features = ["alloc"] }
 pollster = { workspace = true }
-rusqlite = "0.39.0"
+rusqlite = { version = "0.39.0", features = ["vtab"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zerocopy = { workspace = true }
 zstd = "0.13.3"
 
 [dev-dependencies]

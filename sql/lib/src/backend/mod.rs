@@ -1,6 +1,7 @@
 mod convert;
 pub mod model;
 mod stats;
+mod vtab;
 
 use std::fmt::Debug;
 use std::io::Write as _;
@@ -52,13 +53,13 @@ use jj_lib::repo_path::RepoPathComponentBuf;
 use jj_lib::settings::UserSettings;
 use pollster::FutureExt as _;
 use rusqlite::Connection;
+use zerocopy::IntoBytes as _;
 
 pub use self::stats::DbTableStats;
 pub use self::stats::Stats;
 use crate::convert::JjExt;
 use crate::convert::ModelExt as _;
 use crate::error::SqlBackendError;
-use crate::simhash;
 
 // Blake2b-512 hash of an empty tree — identical to SimpleBackend's constant
 // since both use the same content-hashing algorithm.
@@ -100,6 +101,7 @@ impl SqlBackend {
         conn.pragma_update(None, "cache_size", -64 * 1024)?; // 64 MiB (!)
         conn.pragma_update(None, "mmap_size", 1024 * 1024 * 1024)?; // 1 GiB
         conn.pragma_update(None, "temp_store", "MEMORY")?;
+        vtab::load_module(&conn)?;
         Ok(conn)
     }
 
@@ -194,7 +196,7 @@ impl Backend for SqlBackend {
         // Cache hits require no DB access; raise from 1 so jj can read objects
         // in parallel when cache misses occur. The connection pool (TODO) will
         // raise this further once the Mutex<Connection> is replaced.
-        4
+        1
     }
 
     async fn read_file(
@@ -219,11 +221,10 @@ impl Backend for SqlBackend {
         _path: &RepoPath,
         contents: &mut (dyn AsyncRead + Send + Unpin),
     ) -> BackendResult<FileId> {
-        let (id, content, uncompressed_size, file_simhash) = async {
+        let (id, content, uncompressed_size) = async {
             let mut buf = vec![0u8; 16 * 1024];
             let mut hasher = Blake2b512::new();
             let mut compressor = zstd::Encoder::new(Vec::new(), 3)?; // 3 is the current default level.
-            let sim_hasher = simhash::SimHasher::new();
             let mut uncompressed_size: usize = 0;
             loop {
                 let n = contents.read(&mut buf).await?;
@@ -232,7 +233,6 @@ impl Backend for SqlBackend {
                 }
                 hasher.update(&buf[..n]);
                 compressor.write_all(&buf[..n])?;
-                // sim_hasher.update(&buf[..n]);
                 uncompressed_size += n;
             }
             let id = model::FileId::from(hasher.finalize());
@@ -240,8 +240,7 @@ impl Backend for SqlBackend {
             let uncompressed_size = uncompressed_size
                 .try_into()
                 .map_err(SqlBackendError::len_too_large)?;
-            let file_simhash = sim_hasher.finish() as i64;
-            Ok((id, compressed, uncompressed_size, file_simhash))
+            Ok((id, compressed, uncompressed_size))
         }
         .await
         .map_err(|e: SqlBackendError| e.with_write_context("file"))?;
@@ -250,7 +249,7 @@ impl Backend for SqlBackend {
                 id,
                 content,
                 uncompressed_size,
-                simhash: file_simhash,
+                simhash: None,
             })?;
             Ok(id.into_jj())
         })
@@ -406,30 +405,46 @@ impl Backend for SqlBackend {
                 let mut commit_row_ids: Vec<i64> = Vec::new();
                 for (_, value) in &model_entries {
                     match value {
-                        model::TreeEntryValue::File { row_id, .. } => {
-                            file_row_ids.push(*row_id);
+                        model::TreeValue::File { row_id, .. } => {
+                            file_row_ids.push(row_id.0);
                         }
-                        model::TreeEntryValue::Symlink(r) => symlink_row_ids.push(*r),
-                        model::TreeEntryValue::Tree(r) => tree_row_ids.push(*r),
-                        model::TreeEntryValue::Submodule(r) => commit_row_ids.push(*r),
+                        model::TreeValue::Symlink(r) => symlink_row_ids.push(r.0),
+                        model::TreeValue::Tree(r) => tree_row_ids.push(r.0),
+                        model::TreeValue::Submodule(r) => commit_row_ids.push(r.0),
                     }
                 }
 
-                let file_hashes = batch_lookup_hashes(conn, "files", &file_row_ids)?;
-                let symlink_hashes = batch_lookup_hashes(conn, "symlinks", &symlink_row_ids)?;
-                let tree_hashes = batch_lookup_hashes(conn, "trees", &tree_row_ids)?;
-                let commit_hashes = batch_lookup_hashes(conn, "commits", &commit_row_ids)?;
+                let file_hashes = batch_lookup_hashes(
+                    conn,
+                    "SELECT row_id, id FROM files WHERE row_id IN unpack_i64s(?1)",
+                    &file_row_ids,
+                )?;
+                let symlink_hashes = batch_lookup_hashes(
+                    conn,
+                    "SELECT row_id, id FROM symlinks WHERE row_id IN unpack_i64s(?1)",
+                    &symlink_row_ids,
+                )?;
+                let tree_hashes = batch_lookup_hashes(
+                    conn,
+                    "SELECT row_id, id FROM trees WHERE row_id IN unpack_i64s(?1)",
+                    &tree_row_ids,
+                )?;
+                let commit_hashes = batch_lookup_hashes(
+                    conn,
+                    "SELECT row_id, id FROM commits WHERE row_id IN unpack_i64s(?1)",
+                    &commit_row_ids,
+                )?;
 
                 // TODO: Use iterators.
                 let mut entries = Vec::with_capacity(model_entries.len());
                 for (name, value) in model_entries {
                     let jj_value = match value {
-                        model::TreeEntryValue::File {
+                        model::TreeValue::File {
                             row_id,
                             executable,
                             copy_id,
                         } => {
-                            let hash = file_hashes[&row_id];
+                            let hash = file_hashes[&row_id.0];
                             TreeValue::File {
                                 id: model::FileId(hash).into_jj(),
                                 executable,
@@ -438,14 +453,14 @@ impl Backend for SqlBackend {
                                     .unwrap_or_else(CopyId::placeholder),
                             }
                         }
-                        model::TreeEntryValue::Symlink(row_id) => {
-                            TreeValue::Symlink(model::SymlinkId(symlink_hashes[&row_id]).into_jj())
+                        model::TreeValue::Symlink(row_id) => TreeValue::Symlink(
+                            model::SymlinkId(symlink_hashes[&row_id.0]).into_jj(),
+                        ),
+                        model::TreeValue::Tree(row_id) => {
+                            TreeValue::Tree(model::TreeId(tree_hashes[&row_id.0]).into_jj())
                         }
-                        model::TreeEntryValue::Tree(row_id) => {
-                            TreeValue::Tree(model::TreeId(tree_hashes[&row_id]).into_jj())
-                        }
-                        model::TreeEntryValue::Submodule(row_id) => TreeValue::GitSubmodule(
-                            model::CommitId(commit_hashes[&row_id]).into_jj(),
+                        model::TreeValue::Submodule(row_id) => TreeValue::GitSubmodule(
+                            model::CommitId(commit_hashes[&row_id.0]).into_jj(),
                         ),
                     };
                     entries.push((RepoPathComponentBuf::new(name)?, jj_value));
@@ -465,8 +480,45 @@ impl Backend for SqlBackend {
             .write_object("tree", async move |conn| {
                 let tx = conn.transaction()?;
                 let id = model::TreeId::from(blake2b_hash(contents));
+
+                // Collect content IDs by type for batch row_id lookups.
+                let mut file_ids: Vec<model::FileId> = Vec::new();
+                let mut symlink_ids: Vec<model::SymlinkId> = Vec::new();
+                let mut tree_ids: Vec<model::TreeId> = Vec::new();
+                let mut commit_ids: Vec<model::CommitId> = Vec::new();
+                for entry in contents.entries() {
+                    match entry.value() {
+                        TreeValue::File { id, .. } => file_ids.push(id.to_model()?),
+                        TreeValue::Symlink(id) => symlink_ids.push(id.to_model()?),
+                        TreeValue::Tree(id) => tree_ids.push(id.to_model()?),
+                        TreeValue::GitSubmodule(id) => commit_ids.push(id.to_model()?),
+                    }
+                }
+
+                const FILE_SQL: &str = const_format::formatcp!(
+                    "SELECT id, row_id FROM files WHERE id IN unpack_blobs(?1, {STRIDE})",
+                    STRIDE = model::COMMIT_ID_LENGTH,
+                );
+                const SYMLINK_SQL: &str = const_format::formatcp!(
+                    "SELECT id, row_id FROM symlinks WHERE id IN unpack_blobs(?1, {STRIDE})",
+                    STRIDE = model::COMMIT_ID_LENGTH,
+                );
+                const TREE_SQL: &str = const_format::formatcp!(
+                    "SELECT id, row_id FROM trees WHERE id IN unpack_blobs(?1, {STRIDE})",
+                    STRIDE = model::COMMIT_ID_LENGTH,
+                );
+                const COMMIT_SQL: &str = const_format::formatcp!(
+                    "SELECT id, row_id FROM commits WHERE id IN unpack_blobs(?1, {STRIDE})",
+                    STRIDE = model::COMMIT_ID_LENGTH,
+                );
+
+                let file_row_ids = batch_lookup_row_ids(&tx, FILE_SQL, file_ids.as_bytes())?;
+                let symlink_row_ids =
+                    batch_lookup_row_ids(&tx, SYMLINK_SQL, symlink_ids.as_bytes())?;
+                let tree_row_ids = batch_lookup_row_ids(&tx, TREE_SQL, tree_ids.as_bytes())?;
+                let commit_row_ids = batch_lookup_row_ids(&tx, COMMIT_SQL, commit_ids.as_bytes())?;
+
                 let mut model_entries = model::TreeEntries::new();
-                // TODO: We need to batch the lookup of ids.
                 for entry in contents.entries() {
                     let value = match entry.value() {
                         TreeValue::File {
@@ -474,9 +526,9 @@ impl Backend for SqlBackend {
                             executable,
                             copy_id,
                         } => {
-                            let (row_id, _) = model::File::get_by_id(&tx, &file_id.to_model()?)?;
-                            model::TreeEntryValue::File {
-                                row_id: row_id.0,
+                            let model_id = file_id.to_model()?;
+                            model::TreeValue::File {
+                                row_id: model::FileRowId(file_row_ids[&model_id.0]),
                                 executable: *executable,
                                 copy_id: if copy_id.as_bytes().is_empty() {
                                     None
@@ -486,16 +538,20 @@ impl Backend for SqlBackend {
                             }
                         }
                         TreeValue::Symlink(id) => {
-                            let (row_id, _) = model::Symlink::get_by_id(&tx, &id.to_model()?)?;
-                            model::TreeEntryValue::Symlink(row_id.0)
+                            let model_id = id.to_model()?;
+                            model::TreeValue::Symlink(model::SymlinkRowId(
+                                symlink_row_ids[&model_id.0],
+                            ))
                         }
                         TreeValue::Tree(id) => {
-                            let (row_id, _) = model::Tree::get_by_id(&tx, &id.to_model()?)?;
-                            model::TreeEntryValue::Tree(row_id.0)
+                            let model_id = id.to_model()?;
+                            model::TreeValue::Tree(model::TreeRowId(tree_row_ids[&model_id.0]))
                         }
                         TreeValue::GitSubmodule(id) => {
-                            let (row_id, _) = model::Commit::get_by_id(&tx, &id.to_model()?)?;
-                            model::TreeEntryValue::Submodule(row_id.0)
+                            let model_id = id.to_model()?;
+                            model::TreeValue::Submodule(model::CommitRowId(
+                                commit_row_ids[&model_id.0],
+                            ))
                         }
                     };
                     model_entries.push((entry.name().as_internal_str().to_owned(), value));
@@ -671,27 +727,32 @@ impl Backend for SqlBackend {
 
 fn batch_lookup_hashes(
     conn: &Connection,
-    table: &str,
+    sql: &'static str,
     row_ids: &[i64],
 ) -> Result<std::collections::HashMap<i64, crate::hash::Hash<64>>, SqlBackendError> {
     if row_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
-    let placeholders = row_ids
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i + 1))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!("SELECT row_id, id FROM {table} WHERE row_id IN ({placeholders})");
-    let mut stmt = conn.prepare_cached(&sql)?;
+    let blob = row_ids.as_bytes();
+    let mut stmt = conn.prepare_cached(sql)?;
     let map = stmt
-        .query_map(rusqlite::params_from_iter(row_ids), |row| {
-            let row_id: i64 = row.get(0)?;
-            let hash: crate::hash::Hash<64> = row.get(1)?;
-            Ok((row_id, hash))
-        })?
-        .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+        .query_map((blob,), |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(map)
+}
+
+fn batch_lookup_row_ids(
+    conn: &Connection,
+    sql: &'static str,
+    blob: &[u8],
+) -> Result<std::collections::HashMap<crate::hash::Hash<64>, i64>, SqlBackendError> {
+    if blob.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut stmt = conn.prepare_cached(sql)?;
+    let map = stmt
+        .query_map((blob,), |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
     Ok(map)
 }
 
@@ -782,23 +843,23 @@ fn gc_impl(
                 model::decode_tree_entries(&entries_blob).map_err(SqlBackendError::from)?;
             for (_, value) in entries {
                 match value {
-                    model::TreeEntryValue::Tree(child) => {
-                        if live_tree_rows.insert(child) {
-                            queue.push(child);
+                    model::TreeValue::Tree(child) => {
+                        if live_tree_rows.insert(child.0) {
+                            queue.push(child.0);
                         }
                     }
-                    model::TreeEntryValue::File {
+                    model::TreeValue::File {
                         row_id, copy_id, ..
                     } => {
-                        live_file_rows.insert(row_id);
+                        live_file_rows.insert(row_id.0);
                         if let Some(cid) = copy_id {
                             live_copy_ids.insert(cid);
                         }
                     }
-                    model::TreeEntryValue::Symlink(row_id) => {
-                        live_symlink_rows.insert(row_id);
+                    model::TreeValue::Symlink(row_id) => {
+                        live_symlink_rows.insert(row_id.0);
                     }
-                    model::TreeEntryValue::Submodule(_) => {}
+                    model::TreeValue::Submodule(_) => {}
                 }
             }
         }
@@ -818,16 +879,16 @@ fn gc_impl(
                 let entries = model::decode_tree_entries(&blob?)?;
                 for (_, value) in entries {
                     match value {
-                        model::TreeEntryValue::File {
+                        model::TreeValue::File {
                             row_id, copy_id, ..
                         } => {
-                            live_file_rows.insert(row_id);
+                            live_file_rows.insert(row_id.0);
                             if let Some(cid) = copy_id {
                                 live_copy_ids.insert(cid);
                             }
                         }
-                        model::TreeEntryValue::Symlink(row_id) => {
-                            live_symlink_rows.insert(row_id);
+                        model::TreeValue::Symlink(row_id) => {
+                            live_symlink_rows.insert(row_id.0);
                         }
                         _ => {}
                     }
@@ -1095,7 +1156,7 @@ mod tests {
                 id: f,
                 content: vec![1, 2, 3],
                 uncompressed_size: 3,
-                simhash: 0,
+                simhash: None,
             })
             .unwrap();
         let s_row = conn
@@ -1108,16 +1169,16 @@ mod tests {
             &conn,
             t1,
             vec![
-                ("subdir".to_owned(), model::TreeEntryValue::Tree(t2_row.0)),
+                ("subdir".to_owned(), model::TreeValue::Tree(t2_row)),
                 (
                     "file.txt".to_owned(),
-                    model::TreeEntryValue::File {
-                        row_id: f_row.0,
+                    model::TreeValue::File {
+                        row_id: f_row,
                         executable: false,
                         copy_id: None,
                     },
                 ),
-                ("link".to_owned(), model::TreeEntryValue::Symlink(s_row.0)),
+                ("link".to_owned(), model::TreeValue::Symlink(s_row)),
             ],
         );
 
@@ -1140,7 +1201,7 @@ mod tests {
             id: f,
             content: vec![42],
             uncompressed_size: 1,
-            simhash: 0,
+            simhash: None,
         })
         .unwrap();
         conn.insert(model::Symlink {
@@ -1167,7 +1228,7 @@ mod tests {
                 id: f,
                 content: vec![],
                 uncompressed_size: 0,
-                simhash: 0,
+                simhash: None,
             })
             .unwrap();
         let t3_row = insert_tree(
@@ -1175,8 +1236,8 @@ mod tests {
             t3,
             vec![(
                 "c".to_owned(),
-                model::TreeEntryValue::File {
-                    row_id: f_row.0,
+                model::TreeValue::File {
+                    row_id: f_row,
                     executable: false,
                     copy_id: None,
                 },
@@ -1185,12 +1246,12 @@ mod tests {
         let t2_row = insert_tree(
             &conn,
             t2,
-            vec![("b".to_owned(), model::TreeEntryValue::Tree(t3_row.0))],
+            vec![("b".to_owned(), model::TreeValue::Tree(t3_row))],
         );
         insert_tree(
             &conn,
             t1,
-            vec![("a".to_owned(), model::TreeEntryValue::Tree(t2_row.0))],
+            vec![("a".to_owned(), model::TreeValue::Tree(t2_row))],
         );
 
         gc_impl(&mut conn, &[c], &no_empty_tree(), OLD).unwrap();

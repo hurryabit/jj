@@ -34,7 +34,9 @@ macro_rules! id_newtype {
             Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
             balsaq::Column,
             serde::Deserialize, serde::Serialize,
+            zerocopy::IntoBytes, zerocopy::Immutable,
         )]
+        #[repr(transparent)]
         #[serde(transparent)]
         pub struct $name(pub $crate::hash::Hash<$len>);
     };

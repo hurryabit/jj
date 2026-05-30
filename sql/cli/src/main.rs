@@ -1,4 +1,5 @@
 mod import_git;
+mod simhash_files;
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -43,6 +44,8 @@ enum SqlSubcommand {
     GitImport(import_git::ImportGitArgs),
     /// Print statistics about the current repository.
     Stats(StatsArgs),
+    /// Compute and store the simhash for all files that do not have one yet.
+    SimhashFiles(simhash_files::SimhashFilesArgs),
 }
 
 #[derive(clap::Args, Clone, Debug)]
@@ -146,6 +149,9 @@ async fn run_sql_command(
         SqlCommand::Sql(SqlArgs {
             command: SqlSubcommand::Stats(args),
         }) => run_stats(ui, command_helper, &args).await,
+        SqlCommand::Sql(SqlArgs {
+            command: SqlSubcommand::SimhashFiles(args),
+        }) => simhash_files::run(ui, command_helper, &args).await,
         SqlCommand::Sql(SqlArgs {
             command: SqlSubcommand::GitImport(args),
         }) => import_git::run(command_helper.settings(), command_helper.cwd(), &args)

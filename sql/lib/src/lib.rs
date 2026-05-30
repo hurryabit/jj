@@ -1,4 +1,7 @@
+#![feature(portable_simd)]
+
 mod backend;
+mod buzhash;
 mod convert;
 mod error;
 mod hash;
@@ -11,6 +14,8 @@ pub use crate::backend::SqlBackend;
 pub use crate::backend::Stats;
 pub use crate::op_heads_store::SqlOpHeadsStore;
 pub use crate::op_store::SqlOpStore;
+pub use crate::simhash::SimHasher;
+pub use crate::simhash::simhash;
 
 /// Defines a hash-backed ID newtype for use as a model primary key.
 #[macro_export]

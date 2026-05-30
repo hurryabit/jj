@@ -90,7 +90,11 @@ impl SqlBackend {
         "sql"
     }
 
-    fn connect_db(store_path: &Path) -> Result<Connection, SqlBackendError> {
+    pub fn store_path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn connect_db(store_path: &Path) -> Result<Connection, SqlBackendError> {
         let conn = Connection::open(store_path.join("backend.db3"))?;
         conn.busy_timeout(Duration::from_millis(5000))?;
         conn.pragma_update(None, "encoding", "UTF-8")?;

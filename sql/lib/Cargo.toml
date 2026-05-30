@@ -24,10 +24,14 @@ rusqlite = { version = "0.39.0", features = ["vtab"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zerocopy = { workspace = true }
 zstd = "0.13.3"
 
 [dev-dependencies]
+criterion = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
+
+[[bench]]
+name = "simhash"
+harness = false

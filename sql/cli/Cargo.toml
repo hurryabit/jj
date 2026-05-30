@@ -14,6 +14,7 @@ name = "jj-sql"
 path = "src/main.rs"
 
 [dependencies]
+balsaq = { path = "../../../balsaq"}
 bytesize = "1"
 clap = { workspace = true }
 futures = { workspace = true }
@@ -26,3 +27,4 @@ zstd = "0.13.3"
 jj-cli = { path = "../../cli", version = "0.41.0", default-features = false }
 jj-lib = { workspace = true, features = ["git"] }
 jj-sql-lib = { path = "../lib", version = "0.41.0" }
+tempfile = "3"

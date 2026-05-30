@@ -12,10 +12,13 @@ mod simhash;
 pub use crate::backend::DbTableStats;
 pub use crate::backend::SqlBackend;
 pub use crate::backend::Stats;
+pub use crate::backend::model;
+pub use crate::buzhash::BuzHasher;
+pub use crate::error::SqlBackendError;
 pub use crate::op_heads_store::SqlOpHeadsStore;
 pub use crate::op_store::SqlOpStore;
+pub use crate::simhash::SimHash;
 pub use crate::simhash::SimHasher;
-pub use crate::simhash::simhash;
 
 /// Defines a hash-backed ID newtype for use as a model primary key.
 #[macro_export]

@@ -1,11 +1,15 @@
+use std::io::Read;
+
 use balsaq::ConnectionExt as _;
 use balsaq::Model as _;
 use rusqlite::Connection;
 
+use crate::SqlBackendError;
 use crate::id_newtype;
 
 pub const COMMIT_ID_LENGTH: usize = 64;
 pub const CHANGE_ID_LENGTH: usize = 16;
+pub const SIMHASH_WINDOW_SIZE: usize = 8;
 
 id_newtype!(FileId, COMMIT_ID_LENGTH, true);
 id_newtype!(SymlinkId, COMMIT_ID_LENGTH, true);
@@ -17,6 +21,7 @@ id_newtype!(ChangeId, CHANGE_ID_LENGTH, false);
 #[balsaq::schema]
 mod schema {
     use super::*;
+    use crate::SimHash;
 
     #[balsaq::group]
     pub struct Signature {
@@ -32,15 +37,28 @@ mod schema {
         pub sig: Vec<u8>,
     }
 
+    // NOTE: We deliberately do not use an enum for `CompressionMode` since we want
+    // an _open_ enum to make the file metadata usable even for versions that don't
+    // support all the used compression modes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash, balsaq::Column)]
+    pub struct CompressionMode(pub(crate) u8);
+
     #[balsaq::table("files", auto_primary_key, track_last_update)]
     pub struct File {
         #[unique]
+        /// Hash of the _uncompressed_ content.
         pub id: FileId,
-        pub content: Vec<u8>,
-        pub uncompressed_size: i64,
-        /// SimHash fingerprint of the uncompressed content, used to find
-        /// delta-compression base candidates by Hamming distance.
-        pub simhash: Option<i64>,
+        /// Size of the _uncompressed_ content.
+        pub size: i64,
+        /// Similarity hash of the _uncompressed_ content.
+        pub simhash: Option<SimHash<SIMHASH_WINDOW_SIZE>>,
+        /// Mode used for compressing the content.
+        pub compression_mode: CompressionMode,
+        /// ID of the base object used for compression. The exact meaning
+        /// depends on the value of `compression_mode`.
+        pub compression_base_id: Option<i64>,
+        /// The _compressed_ content.
+        pub compressed_data: Vec<u8>,
     }
 
     #[balsaq::table("symlinks", auto_primary_key, track_last_update)]
@@ -187,6 +205,55 @@ mod schema {
 
 pub use schema::*;
 
+impl CompressionMode {
+    /// No compresseion at all (aka "compression" with the identity function).
+    pub const NONE: Self = Self(0);
+    /// Zstandard compression without any dictionary.
+    pub const ZSTD: Self = Self(1);
+    /// Zstandard compression using the file referenced by `compression_base_id`
+    /// as dictionary.
+    pub const ZSTD_SIMILAR: Self = Self(2);
+}
+
+impl File {
+    pub fn decompress(self, conn: &rusqlite::Connection) -> Result<Vec<u8>, SqlBackendError> {
+        // TODO: See if can use blob I/O to avoid allocating the vector for the
+        // compressed data.
+        match self.compression_mode {
+            CompressionMode::NONE => {
+                debug_assert!(self.compression_base_id.is_none());
+                Ok(self.compressed_data)
+            }
+            CompressionMode::ZSTD => {
+                debug_assert!(self.compression_base_id.is_none());
+                let content = zstd::decode_all(self.compressed_data.as_slice())?;
+                Ok(content)
+            }
+            CompressionMode::ZSTD_SIMILAR => {
+                let Some(base_id) = self.compression_base_id else {
+                    return Err(SqlBackendError::InternalError(String::from(
+                        "ZSTD_SIMILAR compressed file without base ID.",
+                    )));
+                };
+                let base_file = conn.get::<Self>(&FileRowId(base_id))?;
+                // TODO: Guard this against unbounded recursion or turn into a bound loop.
+                let base_content = base_file.decompress(conn)?;
+                let mut decompressor = zstd::Decoder::with_dictionary(
+                    self.compressed_data.as_slice(),
+                    base_content.as_slice(),
+                )?;
+                let mut content = Vec::new();
+                decompressor.read_to_end(&mut content)?;
+                Ok(content)
+            }
+            other => Err(SqlBackendError::InternalError(format!(
+                "Unsupported compression mode: {}",
+                other.0,
+            ))),
+        }
+    }
+}
+
 pub type TreeEntries = Vec<(String, TreeValue)>;
 
 pub fn encode_tree_entries(entries: &TreeEntries) -> Result<Vec<u8>, postcard::Error> {
@@ -237,9 +304,11 @@ mod tests {
     fn insert_file(conn: &Connection, id: FileId) -> FileRowId {
         conn.insert(File {
             id,
-            content: vec![],
-            uncompressed_size: 0,
+            size: 0,
             simhash: None,
+            compression_mode: CompressionMode::NONE,
+            compression_base_id: None,
+            compressed_data: vec![],
         })
         .unwrap()
     }

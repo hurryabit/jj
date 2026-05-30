@@ -15,6 +15,7 @@ balsaq = { path = "../../../balsaq"}
 blake2 = { workspace = true }
 clru = { workspace = true }
 const_format = "0.2.36"
+either = "1"
 futures = { workspace = true }
 itertools = { workspace = true }
 jj-lib = { workspace = true }

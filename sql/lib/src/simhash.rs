@@ -26,9 +26,12 @@ type Group = Simd<i16, 8>;
 
 /// Bit-isolation masks: lane `i` selects bit `i` of the broadcast byte.
 const BIT_MASKS: Group = Group::from_array([1, 2, 4, 8, 16, 32, 64, 128]);
-const ZEROS: Group = Group::splat(0);
+const ZEROES: Group = Group::splat(0);
 const ONES: Group = Group::splat(1);
 const MINUS_ONES: Group = Group::splat(-1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SimHash<const N: usize>(pub u64);
 
 /// Streaming SimHash computation over `N`-byte shingles.
 ///
@@ -42,6 +45,7 @@ pub struct SimHasher<const N: usize> {
 }
 
 impl<const N: usize> SimHasher<N> {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             counters: [Group::splat(0); 8],
@@ -56,36 +60,56 @@ impl<const N: usize> SimHasher<N> {
             for (g, group) in self.counters.iter_mut().enumerate() {
                 // Broadcast one byte of the hash across all 8 lanes, isolate
                 // each bit with a mask, then add ±1 based on whether it is set.
-                let bits = Group::splat(((hash >> (g * 8)) as u8) as i16);
-                let mask = (bits & BIT_MASKS).simd_ne(ZEROS);
+                let bits = Group::splat(((hash.0 >> (g * 8)) as u8) as i16);
+                let mask = (bits & BIT_MASKS).simd_ne(ZEROES);
                 *group += mask.select(ONES, MINUS_ONES);
             }
         }
     }
 
     /// Consume the hasher and return the 64-bit SimHash fingerprint.
-    pub fn finish(self) -> u64 {
+    pub fn finish(self) -> SimHash<N> {
         let mut result = 0u64;
         for (g, group) in self.counters.into_iter().enumerate() {
-            result |= group.simd_gt(Group::splat(0)).to_bitmask() << (g * 8);
+            result |= group.simd_gt(ZEROES).to_bitmask() << (g * 8);
         }
-        result
+        SimHash(result)
     }
 }
 
-/// Compute a 64-bit SimHash fingerprint of `content` in one shot.
-pub fn simhash<const N: usize>(content: &[u8]) -> u64 {
-    let mut hasher = SimHasher::<N>::new();
-    hasher.update(content);
-    hasher.finish()
+impl<const N: usize> SimHash<N> {
+    /// Compute a 64-bit SimHash fingerprint of `content` in one shot.
+    pub fn of(content: &[u8]) -> Self {
+        let mut hasher = SimHasher::<N>::new();
+        hasher.update(content);
+        hasher.finish()
+    }
+
+    /// Count the number of differing bits between two SimHashes (Hamming
+    /// distance).
+    ///
+    /// Lower values indicate higher content similarity. A distance of 0 means
+    /// identical fingerprints; ≤ 10 is typically a strong similarity signal.
+    pub fn hamming_distance(self, other: Self) -> u32 {
+        (self.0 ^ other.0).count_ones()
+    }
 }
 
-/// Count the number of differing bits between two SimHashes (Hamming distance).
-///
-/// Lower values indicate higher content similarity. A distance of 0 means
-/// identical fingerprints; ≤ 10 is typically a strong similarity signal.
-pub fn hamming_distance(a: u64, b: u64) -> u32 {
-    (a ^ b).count_ones()
+impl<const N: usize> rusqlite::ToSql for SimHash<N> {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok((self.0 as i64).into())
+    }
+}
+
+impl<const N: usize> rusqlite::types::FromSql for SimHash<N> {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        i64::column_result(value).map(|h| Self(h as u64))
+    }
+}
+
+impl<const N: usize> balsaq::Column for SimHash<N> {
+    const SQL_TYPE: &'static str = i64::SQL_TYPE;
+    const NULLABLE: bool = i64::NULLABLE;
 }
 
 #[cfg(test)]
@@ -96,14 +120,14 @@ mod tests {
 
     #[test]
     fn empty_content_is_zero() {
-        assert_eq!(simhash::<N>(&[]), 0);
+        assert_eq!(SimHash::<N>::of(&[]), SimHash::<N>(0));
     }
 
     #[test]
     fn identical_content_has_distance_zero() {
         let content = b"the quick brown fox jumps over the lazy dog";
         assert_eq!(
-            hamming_distance(simhash::<N>(content), simhash::<N>(content)),
+            SimHash::<N>::of(content).hamming_distance(SimHash::<N>::of(content)),
             0
         );
     }
@@ -112,28 +136,28 @@ mod tests {
     fn similar_content_has_low_distance() {
         let a = b"the quick brown fox jumps over the lazy dog";
         let b = b"the quick brown fox jumps over the lazy cat";
-        let dist = hamming_distance(simhash::<N>(a), simhash::<N>(b));
+        let dist = SimHash::<N>::of(a).hamming_distance(SimHash::<N>::of(b));
         assert!(dist < 20, "expected low hamming distance, got {dist}");
     }
 
     #[test]
     fn different_content_is_non_zero() {
-        let a = simhash::<N>(b"hello world, this is some content for testing");
-        let b = simhash::<N>(b"completely unrelated bytes 1234567890 abcdefgh");
+        let a = SimHash::<N>::of(b"hello world, this is some content for testing");
+        let b = SimHash::<N>::of(b"completely unrelated bytes 1234567890 abcdefgh");
         assert_ne!(a, b);
     }
 
     #[test]
     fn hamming_distance_reflexive() {
-        let h = simhash::<N>(b"some test content that is long enough to shingle");
-        assert_eq!(hamming_distance(h, h), 0);
+        let h = SimHash::<N>::of(b"some test content that is long enough to shingle");
+        assert_eq!(h.hamming_distance(h), 0);
     }
 
     #[test]
     fn hamming_distance_symmetric() {
-        let a = simhash::<N>(b"first string with enough bytes to be shingled");
-        let b = simhash::<N>(b"second string with enough bytes to be shingled");
-        assert_eq!(hamming_distance(a, b), hamming_distance(b, a));
+        let a = SimHash::<N>::of(b"first string with enough bytes to be shingled");
+        let b = SimHash::<N>::of(b"second string with enough bytes to be shingled");
+        assert_eq!(a.hamming_distance(b), b.hamming_distance(a));
     }
 
     /// Feeding data in one chunk must produce the same result as feeding it
@@ -141,7 +165,7 @@ mod tests {
     #[test]
     fn streaming_matches_oneshot() {
         let content = b"the quick brown fox jumps over the lazy dog and other animals";
-        let oneshot = simhash::<N>(content);
+        let oneshot = SimHash::<N>::of(content);
 
         let mut hasher = SimHasher::<N>::new();
         for byte in content {

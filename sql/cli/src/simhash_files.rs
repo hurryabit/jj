@@ -11,6 +11,7 @@ use jj_cli::command_error::CommandError;
 use jj_cli::command_error::internal_error;
 use jj_cli::ui::Ui;
 use jj_lib::repo::Repo as _;
+use jj_sql_lib::SimHash;
 use jj_sql_lib::SqlBackend;
 use rayon::prelude::*;
 use zerocopy::IntoBytes as _;
@@ -109,18 +110,20 @@ pub async fn run(
             static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
         }
         let t = Instant::now();
-        let results: Vec<(i64, i64)> = batch
+        let results: Vec<(i64, SimHash<8>)> = batch
             .par_iter()
             .map(|(row_id, compressed, uncompressed_size)| {
-                DECOMP.with(|d| BUF.with(|buf| {
-                    let mut d = d.borrow_mut();
-                    let mut buf = buf.borrow_mut();
-                    buf.resize(*uncompressed_size as usize, 0);
-                    let n = d.decompress_to_buffer(compressed, &mut *buf)?;
-                    let mut hasher = jj_sql_lib::SimHasher::<8>::new();
-                    hasher.update(&buf[..n]);
-                    Ok((*row_id, hasher.finish() as i64))
-                }))
+                DECOMP.with(|d| {
+                    BUF.with(|buf| {
+                        let mut d = d.borrow_mut();
+                        let mut buf = buf.borrow_mut();
+                        buf.resize(*uncompressed_size as usize, 0);
+                        let n = d.decompress_to_buffer(compressed, &mut *buf)?;
+                        let mut hasher = jj_sql_lib::SimHasher::<8>::new();
+                        hasher.update(&buf[..n]);
+                        Ok((*row_id, hasher.finish()))
+                    })
+                })
             })
             .collect::<std::io::Result<_>>()
             .map_err(internal_error)?;

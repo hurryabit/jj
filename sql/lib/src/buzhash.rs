@@ -38,6 +38,10 @@ const fn generate_table() -> [u64; 256] {
 /// with truly random values (generated offline) before storing hashes.
 const TABLE: [u64; 256] = generate_table();
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct BuzHash<const N: usize>(pub u64);
+
 /// Buzhash rolling hasher over a sliding window of `N` bytes.
 ///
 /// Call [`push`](BuzHasher::push) for each incoming byte. The window is
@@ -46,10 +50,20 @@ pub struct BuzHasher<const N: usize> {
     hash: u64,
     window: [u8; N], // ring buffer
     pos: usize,      // position for the next byte (and of the oldest byte)
-    count: usize,    // number of bytes pushed so far
 }
 
 impl<const N: usize> BuzHasher<N> {
+    const HASH_INIT: u64 = {
+        let mut hash: u64 = 0;
+        let mut i: usize = 0;
+        while i < N {
+            hash = hash.rotate_left(1) ^ TABLE[0];
+            i += 1;
+        }
+        hash
+    };
+
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         const {
             assert!(N >= 1, "BuzHasher window size N must at least one");
@@ -59,24 +73,20 @@ impl<const N: usize> BuzHasher<N> {
             );
         }
         Self {
-            hash: 0,
+            hash: Self::HASH_INIT,
             window: [0; N],
             pos: 0,
-            count: 0,
         }
     }
 
-    pub fn push(&mut self, byte: u8) -> u64 {
-        self.hash = self.hash.rotate_left(1) ^ TABLE[byte as usize];
-        if self.count >= N {
-            // Since we want location independence, we cannot do this before `N`.
-            let outgoing = self.window[self.pos];
-            self.hash ^= TABLE[outgoing as usize].rotate_left(N as u32);
-        }
+    pub fn push(&mut self, byte: u8) -> BuzHash<N> {
+        let outgoing = self.window[self.pos];
+        self.hash = self.hash.rotate_left(1)
+            ^ TABLE[byte as usize]
+            ^ TABLE[outgoing as usize].rotate_left(N as u32);
         self.window[self.pos] = byte;
         self.pos = (self.pos + 1) % N;
-        self.count += 1;
-        self.hash
+        BuzHash(self.hash)
     }
 }
 
@@ -86,7 +96,7 @@ mod tests {
 
     const N: usize = 8;
 
-    fn buzhashes(data: &[u8]) -> Vec<u64> {
+    fn buzhashes(data: &[u8]) -> Vec<BuzHash<N>> {
         let mut h = BuzHasher::<N>::new();
         data.iter().map(|&b| h.push(b)).collect()
     }
@@ -115,8 +125,9 @@ mod tests {
 
     #[test]
     fn adjacent_windows_differ() {
-        let mut h = BuzHasher::<N>::new();
-        let hashes: Vec<u64> = b"abcdefghi".iter().map(|&b| h.push(b)).collect();
-        assert_ne!(hashes[N - 1], hashes[N]);
+        let hashes = buzhashes(b"abcdefghi");
+        for i in 1..hashes.len() {
+            assert_ne!(hashes[i - 1], hashes[i]);
+        }
     }
 }

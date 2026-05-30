@@ -181,6 +181,6 @@ opt-level = 3
 
 [profile.release]
 strip = "debuginfo"
-# debug = 1
+debug = 1
 codegen-units = 1
-# split-debuginfo = "packed"
+split-debuginfo = "packed"

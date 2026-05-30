@@ -1,3 +1,4 @@
+mod compress;
 mod import_git;
 mod simhash_files;
 
@@ -46,6 +47,8 @@ enum SqlSubcommand {
     Stats(StatsArgs),
     /// Compute and store the simhash for all files that do not have one yet.
     SimhashFiles(simhash_files::SimhashFilesArgs),
+    /// Delta-compress files using similar files as zstd dictionaries.
+    Compress(compress::CompressArgs),
 }
 
 #[derive(clap::Args, Clone, Debug)]
@@ -152,6 +155,9 @@ async fn run_sql_command(
         SqlCommand::Sql(SqlArgs {
             command: SqlSubcommand::SimhashFiles(args),
         }) => simhash_files::run(ui, command_helper, &args).await,
+        SqlCommand::Sql(SqlArgs {
+            command: SqlSubcommand::Compress(args),
+        }) => compress::run(ui, command_helper, &args).await,
         SqlCommand::Sql(SqlArgs {
             command: SqlSubcommand::GitImport(args),
         }) => import_git::run(command_helper.settings(), command_helper.cwd(), &args)

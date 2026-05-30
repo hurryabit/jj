@@ -29,6 +29,8 @@ pub enum SqlBackendError {
     },
     #[error(transparent)]
     InvalidNewRepoPathError(#[from] InvalidNewRepoPathError),
+    #[error(transparent)]
+    Other(Box<dyn std::error::Error + Send + Sync>),
     #[error("Internal error: {0}")]
     InternalError(String),
     #[error("Error when reading object {hash} of type {object_type}")]

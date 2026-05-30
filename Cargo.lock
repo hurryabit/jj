@@ -202,6 +202,7 @@ dependencies = [
  "balsaq-macros",
  "const_format",
  "rusqlite",
+ "serde",
 ]
 
 [[package]]
@@ -2794,6 +2795,7 @@ dependencies = [
 name = "jj-sql-cli"
 version = "0.41.0"
 dependencies = [
+ "balsaq",
  "bytesize",
  "clap",
  "futures 0.3.32",
@@ -2804,6 +2806,7 @@ dependencies = [
  "jj-sql-lib",
  "rayon",
  "rusqlite",
+ "tempfile",
  "zerocopy",
  "zstd",
 ]
@@ -2818,6 +2821,7 @@ dependencies = [
  "clru",
  "const_format",
  "criterion",
+ "either",
  "futures 0.3.32",
  "insta",
  "itertools 0.14.0",

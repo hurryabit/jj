@@ -4,7 +4,6 @@ use pollster::FutureExt as _;
 
 use crate::error::SqlBackendError;
 
-
 /// Repository statistics gathered from the SQL store.
 #[derive(Debug, Clone)]
 pub struct Stats {
@@ -43,8 +42,8 @@ impl super::SqlBackend {
         #[rustfmt::skip]
         let (blobs, blob_compressed_bytes, blob_uncompressed_bytes) = conn.query_row(
             "SELECT COUNT(*), \
-                    COALESCE(SUM(LENGTH(content)), 0), \
-                    COALESCE(SUM(uncompressed_size), 0) \
+                    COALESCE(SUM(LENGTH(compressed_data)), 0), \
+                    COALESCE(SUM(size), 0) \
              FROM files",
             (),
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -66,15 +65,17 @@ impl super::SqlBackend {
 
     pub fn db_stats(&self) -> Result<Vec<DbTableStats>, SqlBackendError> {
         let conn = self.db.lock().block_on();
-        let mut stmt = conn.prepare(
-            "SELECT name, \
+        #[rustfmt::skip]
+        let mut stmt = conn.prepare("\
+                SELECT \
+                    name, \
                     SUM(payload) AS payload_bytes, \
-                    SUM(CASE WHEN pagetype = 'leaf' THEN ncell ELSE 0 END) AS rows, \
+                    SUM(CASE WHEN pagetype = 'leaf' THEN ncell ELSE 0 END) AS rows,\
                     SUM(ncell) AS cells \
-             FROM dbstat \
-             GROUP BY name \
-             ORDER BY payload_bytes DESC",
-        )?;
+                FROM dbstat \
+                GROUP BY name \
+                ORDER BY payload_bytes DESC \
+            ")?;
         let rows = stmt
             .query_map((), |r| {
                 Ok(DbTableStats {

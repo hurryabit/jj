@@ -57,9 +57,11 @@ use zerocopy::IntoBytes as _;
 
 pub use self::stats::DbTableStats;
 pub use self::stats::Stats;
+use crate::SimHasher;
 use crate::convert::JjExt;
 use crate::convert::ModelExt as _;
 use crate::error::SqlBackendError;
+use crate::model::CompressionMode;
 
 // Blake2b-512 hash of an empty tree — identical to SimpleBackend's constant
 // since both use the same content-hashing algorithm.
@@ -209,15 +211,13 @@ impl Backend for SqlBackend {
         id: &FileId,
     ) -> BackendResult<Pin<Box<dyn AsyncRead + Send>>> {
         // TODO: Use incremental blob I/O.
-        let row = self
+        let content = self
             .read_object(id, async |conn, id| {
-                let (_row_id, row) = model::File::get_by_id(conn, id)?;
-                Ok(row)
+                let (_row_id, file) = model::File::get_by_id(conn, id)?;
+                file.decompress(conn)
             })
             .await?;
-        let decompressed = zstd::decode_all(row.content.as_slice())
-            .map_err(|e| SqlBackendError::from(e).with_read_context(id))?;
-        Ok(Box::pin(Cursor::new(decompressed)))
+        Ok(Box::pin(Cursor::new(content)))
     }
 
     async fn write_file(
@@ -225,35 +225,38 @@ impl Backend for SqlBackend {
         _path: &RepoPath,
         contents: &mut (dyn AsyncRead + Send + Unpin),
     ) -> BackendResult<FileId> {
-        let (id, content, uncompressed_size) = async {
+        let (id, size, simhash, compressed_data) = async {
             let mut buf = vec![0u8; 16 * 1024];
             let mut hasher = Blake2b512::new();
-            let mut compressor = zstd::Encoder::new(Vec::new(), 3)?; // 3 is the current default level.
-            let mut uncompressed_size: usize = 0;
+            let mut sim_hasher = SimHasher::<{ model::SIMHASH_WINDOW_SIZE }>::new();
+            let mut compressor = zstd::Encoder::new(Vec::new(), zstd::DEFAULT_COMPRESSION_LEVEL)?;
+            let mut size: usize = 0;
             loop {
                 let n = contents.read(&mut buf).await?;
                 if n == 0 {
                     break;
                 }
+                size += n;
                 hasher.update(&buf[..n]);
+                sim_hasher.update(&buf[..n]);
                 compressor.write_all(&buf[..n])?;
-                uncompressed_size += n;
             }
             let id = model::FileId::from(hasher.finalize());
-            let compressed = compressor.finish()?;
-            let uncompressed_size = uncompressed_size
-                .try_into()
-                .map_err(SqlBackendError::len_too_large)?;
-            Ok((id, compressed, uncompressed_size))
+            let size = size.try_into().map_err(SqlBackendError::len_too_large)?;
+            let simhash = sim_hasher.finish();
+            let compressed_data = compressor.finish()?;
+            Ok((id, size, simhash, compressed_data))
         }
         .await
         .map_err(|e: SqlBackendError| e.with_write_context("file"))?;
         self.write_object("file", async move |conn| {
             conn.insert(model::File {
                 id,
-                content,
-                uncompressed_size,
-                simhash: None,
+                size,
+                simhash: Some(simhash),
+                compression_mode: CompressionMode::ZSTD,
+                compression_base_id: None,
+                compressed_data,
             })?;
             Ok(id.into_jj())
         })
@@ -1158,9 +1161,11 @@ mod tests {
         let f_row = conn
             .insert(model::File {
                 id: f,
-                content: vec![1, 2, 3],
-                uncompressed_size: 3,
+                size: 3,
                 simhash: None,
+                compression_mode: CompressionMode::NONE,
+                compression_base_id: None,
+                compressed_data: Vec::from(b"abc"),
             })
             .unwrap();
         let s_row = conn
@@ -1203,9 +1208,11 @@ mod tests {
         insert_tree(&conn, t, model::TreeEntries::new());
         conn.insert(model::File {
             id: f,
-            content: vec![42],
-            uncompressed_size: 1,
+            size: 1,
             simhash: None,
+            compression_mode: CompressionMode::NONE,
+            compression_base_id: None,
+            compressed_data: Vec::from(b"X"),
         })
         .unwrap();
         conn.insert(model::Symlink {
@@ -1230,9 +1237,11 @@ mod tests {
         let f_row = conn
             .insert(model::File {
                 id: f,
-                content: vec![],
-                uncompressed_size: 0,
+                size: 0,
                 simhash: None,
+                compression_mode: CompressionMode::NONE,
+                compression_base_id: None,
+                compressed_data: Vec::new(),
             })
             .unwrap();
         let t3_row = insert_tree(

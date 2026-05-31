@@ -4519,7 +4519,7 @@ impl<'a> CliRunner<'a> {
 
     #[must_use]
     #[instrument(skip(self))]
-    pub fn run(mut self) -> u8 {
+    pub async fn run(mut self) -> u8 {
         // Tell crossterm to ignore NO_COLOR (we check it ourselves)
         crossterm::style::force_color_output(true);
         let config = config_from_environment(self.config_layers.drain(..));
@@ -4527,7 +4527,7 @@ impl<'a> CliRunner<'a> {
         // If it had, the configuration will be fixed by the next ui.reset().
         let mut ui = Ui::with_config(config.as_ref())
             .expect("default config should be valid, env vars are stringly typed");
-        let result = self.run_internal(&mut ui, config).block_on();
+        let result = self.run_internal(&mut ui, config).await;
         let exit_code = handle_command_result(&mut ui, result);
         ui.finalize_pager();
         exit_code

@@ -63,11 +63,25 @@ pub async fn run(
     let (_workspace, repo) = Workspace::init_with_factories(
         settings,
         dest,
-        &|settings, store_path| Ok(Box::new(SqlBackend::init(settings, store_path)?)),
+        &|settings, store_path| {
+            let backend = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(SqlBackend::init(settings, store_path))
+            })?;
+            Ok(Box::new(backend))
+        },
         Signer::from_settings(settings).map_err(|e| Box::new(e) as BoxError)?,
-        &|_settings, store_path, root_data| Ok(Box::new(SqlOpStore::init(store_path, root_data)?)),
+        &|_settings, store_path, root_data| {
+            let op_store = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(SqlOpStore::init(store_path, root_data))
+            })?;
+            Ok(Box::new(op_store))
+        },
         &|_settings, store_path, root_op_id| {
-            Ok(Box::new(SqlOpHeadsStore::init(store_path, root_op_id)?))
+            let op_heads = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(SqlOpHeadsStore::init(store_path, root_op_id))
+            })?;
+            Ok(Box::new(op_heads))
         },
         ReadonlyRepo::default_index_store_initializer(),
         ReadonlyRepo::default_submodule_store_initializer(),

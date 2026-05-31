@@ -19,6 +19,10 @@
 
 use std::simd::prelude::*;
 
+use sqlx::Database;
+use sqlx::Sqlite;
+use sqlx::error::BoxDynError;
+
 use crate::buzhash::BuzHasher;
 
 /// One 128-bit NEON register: 8 × i16 counters.
@@ -30,7 +34,8 @@ const ZEROES: Group = Group::splat(0);
 const ONES: Group = Group::splat(1);
 const MINUS_ONES: Group = Group::splat(-1);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, proptest_derive::Arbitrary)]
+#[repr(transparent)]
 pub struct SimHash<const N: usize>(pub u64);
 
 /// Streaming SimHash computation over `N`-byte shingles.
@@ -95,21 +100,25 @@ impl<const N: usize> SimHash<N> {
     }
 }
 
-impl<const N: usize> rusqlite::ToSql for SimHash<N> {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-        Ok((self.0 as i64).into())
+impl<'r, const N: usize> sqlx::Decode<'r, Sqlite> for SimHash<N> {
+    fn decode(value: <Sqlite as Database>::ValueRef<'r>) -> Result<Self, BoxDynError> {
+        Ok(Self(<i64 as sqlx::Decode<Sqlite>>::decode(value)? as u64))
     }
 }
 
-impl<const N: usize> rusqlite::types::FromSql for SimHash<N> {
-    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
-        i64::column_result(value).map(|h| Self(h as u64))
+impl<'q, const N: usize> sqlx::Encode<'q, Sqlite> for SimHash<N> {
+    fn encode_by_ref(
+        &self,
+        buf: &mut <Sqlite as Database>::ArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, BoxDynError> {
+        <i64 as sqlx::Encode<Sqlite>>::encode_by_ref(&(self.0 as i64), buf)
     }
 }
 
-impl<const N: usize> balsaq::Column for SimHash<N> {
-    const SQL_TYPE: &'static str = i64::SQL_TYPE;
-    const NULLABLE: bool = i64::NULLABLE;
+impl<const N: usize> sqlx::Type<Sqlite> for SimHash<N> {
+    fn type_info() -> <Sqlite as Database>::TypeInfo {
+        <i64 as sqlx::Type<Sqlite>>::type_info()
+    }
 }
 
 #[cfg(test)]

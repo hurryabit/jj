@@ -22,6 +22,7 @@ use jj_lib::extensions_map::ExtensionsMap;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use jj_lib::operation::Operation;
+use pollster::FutureExt as _;
 
 struct HexCounter;
 
@@ -92,5 +93,6 @@ fn main() -> std::process::ExitCode {
     CliRunner::init()
         .add_operation_template_extension(Box::new(HexCounter))
         .run()
+        .block_on()
         .into()
 }

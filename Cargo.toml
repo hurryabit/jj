@@ -2,7 +2,7 @@ cargo-features = []
 
 [workspace]
 resolver = "3"
-members = ["cli", "lib", "lib/gen-protos", "lib/proc-macros", "lib/testutils", "sql/lib", "sql/cli"]
+members = ["cli", "lib", "lib/gen-protos", "lib/proc-macros", "lib/testutils", "sql/lib", "sql/cli", "sql/macro"]
 
 [workspace.package]
 version = "0.41.0"

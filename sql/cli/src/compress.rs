@@ -1,8 +1,8 @@
+#![allow(unused)]
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::io::Write as _;
 
-use balsaq::ConnectionExt;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use jj_cli::cli_util::CommandHelper;
@@ -13,8 +13,7 @@ use jj_lib::repo::Repo as _;
 use jj_sql_lib::SimHash;
 use jj_sql_lib::SqlBackend;
 use jj_sql_lib::SqlBackendError;
-use jj_sql_lib::model;
-use rusqlite::named_params;
+use jj_sql_lib::backend::model;
 use zstd::Encoder;
 
 #[derive(clap::Args, Clone, Debug)]
@@ -29,6 +28,7 @@ pub async fn run(
     command_helper: &CommandHelper,
     args: &CompressArgs,
 ) -> Result<(), CommandError> {
+    /*
     let workspace = command_helper.workspace_helper(ui).await?;
     async {
         let Some(backend) = workspace.repo().store().backend_impl::<SqlBackend>() else {
@@ -36,7 +36,7 @@ pub async fn run(
                 "not a SQL-backed repository",
             )));
         };
-        let conn = SqlBackend::connect_db(backend.store_path())?;
+        let conn = backend.db_conn().await?;
 
         let filter = if args.recompress {
             "WHERE simhash IS NOT NULL"
@@ -118,4 +118,6 @@ pub async fn run(
     }
     .await
     .map_err(|e: SqlBackendError| internal_error(e))
+    */
+    Ok(())
 }

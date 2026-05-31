@@ -18,7 +18,12 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use jj_cli::cli_util::CliRunner;
+use pollster::FutureExt as _;
 
 fn main() -> std::process::ExitCode {
-    CliRunner::init().version(env!("JJ_VERSION")).run().into()
+    CliRunner::init()
+        .version(env!("JJ_VERSION"))
+        .run()
+        .block_on()
+        .into()
 }

@@ -212,7 +212,13 @@ impl TestEnvironment {
         );
         factories.add_backend(
             SqlBackend::name(),
-            Box::new(|settings, store_path| Ok(Box::new(SqlBackend::load(settings, store_path)?))),
+            Box::new(|settings, store_path| {
+                let backend = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(SqlBackend::init(settings, store_path))
+                })?;
+                Ok(Box::new(backend))
+            }),
         );
         factories
     }
@@ -254,7 +260,13 @@ impl TestRepoBackend {
         match self {
             Self::Git => Ok(Box::new(GitBackend::init_internal(settings, store_path)?)),
             Self::Simple => Ok(Box::new(SimpleBackend::init(store_path))),
-            Self::Sql => Ok(Box::new(SqlBackend::init(settings, store_path)?)),
+            Self::Sql => {
+                let backend = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(SqlBackend::init(settings, store_path))
+                })?;
+                Ok(Box::new(backend))
+            }
             Self::Test => Ok(Box::new(env.test_backend_factory.init(store_path))),
         }
     }

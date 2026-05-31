@@ -1,209 +1,140 @@
 use std::io::Read;
 
-use balsaq::ConnectionExt as _;
-use balsaq::Model as _;
-use rusqlite::Connection;
+use jj_sql_macro::sql;
+use sqlx::Row as _;
+use sqlx::Sqlite;
+use sqlx::SqlitePool;
+use sqlx::sqlite::SqliteArguments;
+use sqlx::sqlite::SqliteRow;
 
+use crate::SimHash;
 use crate::SqlBackendError;
+use crate::error::SqlBackendResult;
 use crate::id_newtype;
+pub use crate::model::Model;
+pub use crate::model::SqliteConnectionExt;
+use crate::postcard::Postcard;
+use crate::row_id_newtype;
 
 pub const COMMIT_ID_LENGTH: usize = 64;
 pub const CHANGE_ID_LENGTH: usize = 16;
 pub const SIMHASH_WINDOW_SIZE: usize = 8;
+
+row_id_newtype!(FileRowId);
+row_id_newtype!(SymlinkRowId);
+row_id_newtype!(TreeRowId);
+row_id_newtype!(CommitRowId);
+row_id_newtype!(CopyHistoryRowId);
 
 id_newtype!(FileId, COMMIT_ID_LENGTH, true);
 id_newtype!(SymlinkId, COMMIT_ID_LENGTH, true);
 id_newtype!(TreeId, COMMIT_ID_LENGTH, true);
 id_newtype!(CommitId, COMMIT_ID_LENGTH, true);
 id_newtype!(CopyId, COMMIT_ID_LENGTH, true);
+
 id_newtype!(ChangeId, CHANGE_ID_LENGTH, false);
 
-#[balsaq::schema]
-mod schema {
-    use super::*;
-    use crate::SimHash;
-
-    #[balsaq::group]
-    pub struct Signature {
-        pub name: String,
-        pub email: String,
-        pub timestamp: i64,
-        pub tz_offset: i32,
-    }
-
-    #[balsaq::group]
-    pub struct SecureSig {
-        pub data: Vec<u8>,
-        pub sig: Vec<u8>,
-    }
-
-    // NOTE: We deliberately do not use an enum for `CompressionMode` since we want
-    // an _open_ enum to make the file metadata usable even for versions that don't
-    // support all the used compression modes.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash, balsaq::Column)]
-    pub struct CompressionMode(pub(crate) u8);
-
-    #[balsaq::table("files", auto_primary_key, track_last_update)]
-    pub struct File {
-        #[unique]
-        /// Hash of the _uncompressed_ content.
-        pub id: FileId,
-        /// Size of the _uncompressed_ content.
-        pub size: i64,
-        /// Similarity hash of the _uncompressed_ content.
-        pub simhash: Option<SimHash<SIMHASH_WINDOW_SIZE>>,
-        /// Mode used for compressing the content.
-        pub compression_mode: CompressionMode,
-        /// ID of the base object used for compression. The exact meaning
-        /// depends on the value of `compression_mode`.
-        pub compression_base_id: Option<i64>,
-        /// The _compressed_ content.
-        pub compressed_data: Vec<u8>,
-    }
-
-    #[balsaq::table("symlinks", auto_primary_key, track_last_update)]
-    pub struct Symlink {
-        #[unique]
-        pub id: SymlinkId,
-        pub target: String,
-    }
-
-    #[balsaq::table("trees", auto_primary_key, track_last_update)]
-    pub struct Tree {
-        #[unique]
-        pub id: TreeId,
-        pub entries: Vec<u8>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-    pub enum TreeValue {
-        File {
-            row_id: FileRowId,
-            executable: bool,
-            copy_id: Option<CopyId>,
-        },
-        Symlink(SymlinkRowId),
-        Tree(TreeRowId),
-        Submodule(CommitRowId),
-    }
-
-    #[balsaq::table("commits", auto_primary_key, track_last_update)]
-    #[index(change_id)]
-    pub struct Commit {
-        #[unique]
-        pub id: CommitId,
-        pub change_id: ChangeId,
-        pub description: String,
-        #[group]
-        pub author: Signature,
-        #[group]
-        pub committer: Signature,
-        #[group]
-        pub secure_sig: Option<SecureSig>,
-    }
-
-    #[balsaq::table("commit_root_trees")]
-    pub struct CommitRootTree {
-        #[primary_key]
-        pub commit_id: CommitId,
-        #[primary_key]
-        pub position: i64,
-        pub tree_id: TreeId,
-        pub conflict_label: String,
-    }
-
-    impl CommitRootTree {
-        pub fn get_all_for_commit(
-            conn: &Connection,
-            commit_id: &CommitId,
-        ) -> rusqlite::Result<Vec<Self>> {
-            const SQL: &str = const_format::concatcp!(
-                CommitRootTree::SELECT,
-                " WHERE commit_id = ?1 ORDER BY position ASC"
-            );
-            conn.get_all(SQL, (commit_id,))
-        }
-    }
-
-    #[balsaq::table("commit_parents")]
-    #[index(parent_id)]
-    pub struct CommitParent {
-        #[primary_key]
-        pub commit_id: CommitId,
-        #[primary_key]
-        pub position: i64,
-        pub parent_id: CommitId,
-    }
-
-    impl CommitParent {
-        pub fn get_all_for_commit(
-            conn: &Connection,
-            commit_id: &CommitId,
-        ) -> rusqlite::Result<Vec<Self>> {
-            const SQL: &str = const_format::concatcp!(
-                CommitParent::SELECT,
-                " WHERE commit_id = ?1 ORDER BY position ASC"
-            );
-            conn.get_all(SQL, (commit_id,))
-        }
-    }
-
-    #[balsaq::table("commit_predecessors")]
-    pub struct CommitPredecessor {
-        #[primary_key]
-        pub commit_id: CommitId,
-        #[primary_key]
-        pub position: i64,
-        pub predecessor_id: CommitId,
-    }
-
-    impl CommitPredecessor {
-        pub fn get_all_for_commit(
-            conn: &Connection,
-            commit_id: &CommitId,
-        ) -> rusqlite::Result<Vec<Self>> {
-            const SQL: &str = const_format::concatcp!(
-                CommitPredecessor::SELECT,
-                " WHERE commit_id = ?1 ORDER BY position ASC"
-            );
-            conn.get_all(SQL, (commit_id,))
-        }
-    }
-
-    #[balsaq::table("copies", track_last_update)]
-    pub struct Copy {
-        #[primary_key]
-        pub id: CopyId,
-        pub generation: i64,
-        pub current_path: String,
-        pub salt: Vec<u8>,
-    }
-
-    #[balsaq::table("copy_parents")]
-    #[index(parent_id)]
-    pub struct CopyParent {
-        #[primary_key]
-        pub copy_id: CopyId,
-        #[primary_key]
-        pub position: i64,
-        pub parent_id: CopyId,
-    }
-
-    impl CopyParent {
-        pub fn get_all_for_copy(
-            conn: &Connection,
-            copy_id: &CopyId,
-        ) -> rusqlite::Result<Vec<Self>> {
-            const SQL: &str = const_format::concatcp!(
-                CopyParent::SELECT,
-                " WHERE copy_id = ?1 ORDER BY position ASC"
-            );
-            conn.get_all(SQL, (copy_id,))
-        }
-    }
+#[derive(Clone, Debug, PartialEq, Eq, proptest_derive::Arbitrary)]
+pub struct Signature {
+    pub name: String,
+    pub email: String,
+    pub timestamp: i64,
+    pub tz_offset: i32,
 }
 
-pub use schema::*;
+#[derive(Clone, Debug, PartialEq, Eq, proptest_derive::Arbitrary)]
+pub struct SecureSig {
+    pub data: Vec<u8>,
+    pub sig: Vec<u8>,
+}
+
+// NOTE: We deliberately do not use an enum for `CompressionMode` since we want
+// an _open_ enum to make the file metadata usable even for versions that don't
+// support all the used compression modes.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Ord,
+    PartialOrd,
+    Hash,
+    sqlx::Type,
+    proptest_derive::Arbitrary,
+)]
+#[repr(transparent)]
+#[sqlx(transparent)]
+pub struct CompressionMode(pub(crate) u8);
+
+#[derive(Clone, Debug, PartialEq, Eq, proptest_derive::Arbitrary, sqlx::FromRow)]
+pub struct File {
+    /// Hash of the _uncompressed_ content.
+    pub id: FileId,
+    /// Size of the _uncompressed_ content.
+    pub size: i64,
+    /// Similarity hash of the _uncompressed_ content.
+    pub simhash: Option<SimHash<SIMHASH_WINDOW_SIZE>>,
+    /// Mode used for compressing the content.
+    pub compression_mode: CompressionMode,
+    /// ID of the base object used for compression. The exact meaning
+    /// depends on the value of `compression_mode`.
+    pub compression_base_id: Option<i64>,
+    /// The _compressed_ content.
+    pub compressed_data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, proptest_derive::Arbitrary, sqlx::FromRow)]
+pub struct Symlink {
+    pub id: SymlinkId,
+    pub target: String,
+}
+
+#[derive(
+    Clone, Debug, PartialEq, Eq, proptest_derive::Arbitrary, serde::Serialize, serde::Deserialize,
+)]
+pub enum TreeValue {
+    File {
+        row_id: FileRowId,
+        executable: bool,
+        // TODO: Use a `CopyRowId` here.
+        copy_id: Option<CopyId>,
+    },
+    Symlink(SymlinkRowId),
+    Tree(TreeRowId),
+    Submodule(CommitRowId),
+}
+
+pub type TreeEntries = Vec<(String, TreeValue)>;
+
+#[derive(Clone, Debug, PartialEq, Eq, proptest_derive::Arbitrary, sqlx::FromRow)]
+pub struct Tree {
+    pub id: TreeId,
+    pub entries: Postcard<TreeEntries>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, proptest_derive::Arbitrary)]
+pub struct Commit {
+    pub id: CommitId,
+    pub parents: Postcard<Vec<CommitRowId>>,
+    pub predecessors: Postcard<Vec<CommitRowId>>,
+    pub root_trees: Postcard<Vec<TreeRowId>>,
+    pub conflict_labels: Postcard<Vec<String>>,
+    pub change_id: ChangeId,
+    pub description: String,
+    pub author: Signature,
+    pub committer: Signature,
+    pub secure_sig: Option<SecureSig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, proptest_derive::Arbitrary, sqlx::FromRow)]
+pub struct CopyHistory {
+    pub id: CopyId,
+    pub generation: i64,
+    pub current_path: String,
+    pub parents: Postcard<Vec<CopyHistoryRowId>>,
+    pub salt: Vec<u8>,
+}
 
 impl CompressionMode {
     /// No compresseion at all (aka "compression" with the identity function).
@@ -215,8 +146,100 @@ impl CompressionMode {
     pub const ZSTD_SIMILAR: Self = Self(2);
 }
 
+impl Model for File {
+    const TABLE_NAME: &str = "files";
+
+    type RowId = FileRowId;
+    type HashId = FileId;
+
+    fn hash_id(&self) -> &Self::HashId {
+        &self.id
+    }
+
+    fn insert_query(&self) -> sqlx::query::Query<'_, Sqlite, SqliteArguments> {
+        sqlx::query!(
+            "
+            INSERT INTO files (
+                id,
+                size,
+                simhash,
+                compression_mode,
+                compression_base_id,
+                compressed_data,
+                __last_written_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, unixepoch('now') * 1000)
+            ON CONFLICT(id) DO UPDATE
+            SET __last_written_ms = MAX(__last_written_ms, excluded.__last_written_ms)
+            ",
+            self.id,
+            self.size,
+            self.simhash,
+            self.compression_mode,
+            self.compression_base_id,
+            self.compressed_data,
+        )
+    }
+
+    fn fetch_by_row_id_query(
+        row_id: Self::RowId,
+    ) -> sqlx::query::Map<
+        'static,
+        Sqlite,
+        impl FnMut(SqliteRow) -> sqlx::Result<Self> + Send,
+        SqliteArguments,
+    > {
+        sqlx::query(sql!(
+            "
+            SELECT
+                id,
+                size,
+                simhash,
+                compression_mode,
+                compression_base_id,
+                compressed_data
+            FROM files
+            WHERE row_id = ?
+            "
+        ))
+        .bind(row_id)
+        .try_map(|row| sqlx::FromRow::<SqliteRow>::from_row(&row))
+    }
+
+    fn fetch_by_hash_id_query(
+        hash_id: &Self::HashId,
+    ) -> sqlx::query::Map<
+        '_,
+        Sqlite,
+        impl FnMut(SqliteRow) -> sqlx::Result<(Self::RowId, Self)> + Send,
+        SqliteArguments,
+    > {
+        sqlx::query(sql!(
+            "
+            SELECT
+                row_id,
+                id,
+                size,
+                simhash,
+                compression_mode,
+                compression_base_id,
+                compressed_data
+            FROM files
+            WHERE id = ?
+            "
+        ))
+        .bind(hash_id)
+        .try_map(|row| {
+            Ok((
+                row.try_get("row_id")?,
+                sqlx::FromRow::<SqliteRow>::from_row(&row)?,
+            ))
+        })
+    }
+}
+
 impl File {
-    pub fn decompress(self, conn: &rusqlite::Connection) -> Result<Vec<u8>, SqlBackendError> {
+    pub async fn decompress(self, pool: &SqlitePool) -> SqlBackendResult<Vec<u8>> {
         // TODO: See if can use blob I/O to avoid allocating the vector for the
         // compressed data.
         match self.compression_mode {
@@ -235,9 +258,13 @@ impl File {
                         "ZSTD_SIMILAR compressed file without base ID.",
                     )));
                 };
-                let base_file = conn.get::<Self>(&FileRowId(base_id))?;
-                // TODO: Guard this against unbounded recursion or turn into a bound loop.
-                let base_content = base_file.decompress(conn)?;
+                let base_file = pool
+                    .acquire()
+                    .await?
+                    .fetch_by_row_id::<File>(FileRowId(base_id))
+                    .await?;
+                // TODO: Guard this against unbounded recursion or turn into a bounded loop.
+                let base_content = Box::pin(base_file.decompress(pool)).await?;
                 let mut decompressor = zstd::Decoder::with_dictionary(
                     self.compressed_data.as_slice(),
                     base_content.as_slice(),
@@ -254,242 +281,454 @@ impl File {
     }
 }
 
-pub type TreeEntries = Vec<(String, TreeValue)>;
+impl Model for Symlink {
+    const TABLE_NAME: &str = "symlinks";
 
-pub fn encode_tree_entries(entries: &TreeEntries) -> Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(entries)
+    type RowId = SymlinkRowId;
+    type HashId = SymlinkId;
+
+    fn hash_id(&self) -> &Self::HashId {
+        &self.id
+    }
+
+    fn insert_query(&self) -> sqlx::query::Query<'_, Sqlite, SqliteArguments> {
+        sqlx::query!(
+            "
+            INSERT INTO symlinks (
+                id,
+                target,
+                __last_written_ms
+            )
+            VALUES (?, ?, unixepoch('now') * 1000)
+            ON CONFLICT(id) DO UPDATE
+            SET __last_written_ms = MAX(__last_written_ms, excluded.__last_written_ms)
+            ",
+            self.id,
+            self.target,
+        )
+    }
+
+    fn fetch_by_row_id_query(
+        row_id: Self::RowId,
+    ) -> sqlx::query::Map<
+        'static,
+        Sqlite,
+        impl FnMut(SqliteRow) -> sqlx::Result<Self>,
+        SqliteArguments,
+    > {
+        sqlx::query(sql!(
+            "
+            SELECT id, target
+            FROM symlinks
+            WHERE row_id = ?
+            "
+        ))
+        .bind(row_id)
+        .try_map(|row| sqlx::FromRow::<SqliteRow>::from_row(&row))
+    }
+
+    fn fetch_by_hash_id_query(
+        hash_id: &Self::HashId,
+    ) -> sqlx::query::Map<
+        '_,
+        Sqlite,
+        impl FnMut(SqliteRow) -> sqlx::Result<(Self::RowId, Self)>,
+        SqliteArguments,
+    > {
+        sqlx::query(sql!(
+            "
+            SELECT row_id, id, target
+            FROM symlinks
+            WHERE id = ?
+            "
+        ))
+        .bind(hash_id)
+        .try_map(|row| {
+            Ok((
+                row.try_get("row_id")?,
+                sqlx::FromRow::<SqliteRow>::from_row(&row)?,
+            ))
+        })
+    }
 }
 
-pub fn decode_tree_entries(bytes: &[u8]) -> Result<TreeEntries, postcard::Error> {
-    postcard::from_bytes(bytes)
+impl Model for Tree {
+    const TABLE_NAME: &str = "trees";
+
+    type RowId = TreeRowId;
+    type HashId = TreeId;
+
+    fn hash_id(&self) -> &Self::HashId {
+        &self.id
+    }
+
+    fn insert_query(&self) -> sqlx::query::Query<'_, Sqlite, SqliteArguments> {
+        sqlx::query!(
+            "
+            INSERT INTO trees (
+                id,
+                entries,
+                __last_written_ms
+            )
+            VALUES (?, ?, unixepoch('now') * 1000)
+            ON CONFLICT(id) DO UPDATE
+            SET __last_written_ms = MAX(__last_written_ms, excluded.__last_written_ms)
+            ",
+            self.id,
+            self.entries,
+        )
+    }
+
+    fn fetch_by_row_id_query(
+        row_id: Self::RowId,
+    ) -> sqlx::query::Map<
+        'static,
+        Sqlite,
+        impl FnMut(SqliteRow) -> sqlx::Result<Self> + Send,
+        SqliteArguments,
+    > {
+        sqlx::query(sql!(
+            "
+            SELECT id, entries
+            FROM trees
+            WHERE row_id = ?
+            "
+        ))
+        .bind(row_id)
+        .try_map(|row| sqlx::FromRow::<SqliteRow>::from_row(&row))
+    }
+
+    fn fetch_by_hash_id_query(
+        hash_id: &Self::HashId,
+    ) -> sqlx::query::Map<
+        '_,
+        Sqlite,
+        impl FnMut(SqliteRow) -> sqlx::Result<(Self::RowId, Self)> + Send,
+        SqliteArguments,
+    > {
+        sqlx::query(sql!(
+            "
+            SELECT row_id, id, entries
+            FROM trees
+            WHERE id = ?
+            "
+        ))
+        .bind(hash_id)
+        .try_map(|row| {
+            Ok((
+                row.try_get("row_id")?,
+                sqlx::FromRow::<SqliteRow>::from_row(&row)?,
+            ))
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct CommitRaw {
+    id: CommitId,
+    parents: Postcard<Vec<CommitRowId>>,
+    predecessors: Postcard<Vec<CommitRowId>>,
+    root_trees: Postcard<Vec<TreeRowId>>,
+    conflict_labels: Postcard<Vec<String>>,
+    change_id: ChangeId,
+    description: String,
+    author_name: String,
+    author_email: String,
+    author_timestamp: i64,
+    author_tz_offset: i32,
+    committer_name: String,
+    committer_email: String,
+    committer_timestamp: i64,
+    committer_tz_offset: i32,
+    secure_sig_data: Option<Vec<u8>>,
+    secure_sig_sig: Option<Vec<u8>>,
+}
+
+impl TryFrom<CommitRaw> for Commit {
+    type Error = sqlx::Error;
+
+    fn try_from(raw: CommitRaw) -> Result<Self, Self::Error> {
+        let secure_sig = match (raw.secure_sig_data, raw.secure_sig_sig) {
+            (Some(data), Some(sig)) => Some(SecureSig { data, sig }),
+            (None, None) => None,
+            _ => {
+                return Err(sqlx::Error::ColumnDecode {
+                    index: "secure_sig".to_string(),
+                    source: "inconsistent NULL values for secure_sig columns".into(),
+                });
+            }
+        };
+        Ok(Commit {
+            id: raw.id,
+            parents: raw.parents,
+            predecessors: raw.predecessors,
+            root_trees: raw.root_trees,
+            conflict_labels: raw.conflict_labels,
+            change_id: raw.change_id,
+            description: raw.description,
+            author: Signature {
+                name: raw.author_name,
+                email: raw.author_email,
+                timestamp: raw.author_timestamp,
+                tz_offset: raw.author_tz_offset,
+            },
+            committer: Signature {
+                name: raw.committer_name,
+                email: raw.committer_email,
+                timestamp: raw.committer_timestamp,
+                tz_offset: raw.committer_tz_offset,
+            },
+            secure_sig,
+        })
+    }
+}
+
+impl Model for Commit {
+    const TABLE_NAME: &str = "commits";
+
+    type RowId = CommitRowId;
+    type HashId = CommitId;
+
+    fn hash_id(&self) -> &Self::HashId {
+        &self.id
+    }
+
+    fn insert_query(&self) -> sqlx::query::Query<'_, Sqlite, SqliteArguments> {
+        sqlx::query!(
+            "
+            INSERT INTO commits (
+                id,
+                parents,
+                predecessors,
+                root_trees,
+                conflict_labels,
+                change_id,
+                description,
+                author_name,
+                author_email,
+                author_timestamp,
+                author_tz_offset,
+                committer_name,
+                committer_email,
+                committer_timestamp,
+                committer_tz_offset,
+                secure_sig_data,
+                secure_sig_sig,
+                __last_written_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch('now') * 1000)
+            ON CONFLICT(id) DO UPDATE
+            SET __last_written_ms = MAX(__last_written_ms, excluded.__last_written_ms)
+            ",
+            self.id,
+            self.parents,
+            self.predecessors,
+            self.root_trees,
+            self.conflict_labels,
+            self.change_id,
+            self.description,
+            self.author.name,
+            self.author.email,
+            self.author.timestamp,
+            self.author.tz_offset,
+            self.committer.name,
+            self.committer.email,
+            self.committer.timestamp,
+            self.committer.tz_offset,
+            self.secure_sig.as_ref().map(|s| &s.data),
+            self.secure_sig.as_ref().map(|s| &s.sig),
+        )
+    }
+
+    fn fetch_by_row_id_query(
+        row_id: Self::RowId,
+    ) -> sqlx::query::Map<
+        'static,
+        Sqlite,
+        impl FnMut(SqliteRow) -> sqlx::Result<Self> + Send,
+        SqliteArguments,
+    > {
+        sqlx::query(sql!(
+            "
+            SELECT
+                id,
+                parents,
+                predecessors,
+                root_trees,
+                conflict_labels,
+                change_id,
+                description,
+                author_name,
+                author_email,
+                author_timestamp,
+                author_tz_offset,
+                committer_name,
+                committer_email,
+                committer_timestamp,
+                committer_tz_offset,
+                secure_sig_data,
+                secure_sig_sig
+            FROM commits
+            WHERE row_id = ?
+            "
+        ))
+        .bind(row_id)
+        .try_map(|row| <CommitRaw as sqlx::FromRow<SqliteRow>>::from_row(&row)?.try_into())
+    }
+
+    fn fetch_by_hash_id_query(
+        hash_id: &Self::HashId,
+    ) -> sqlx::query::Map<
+        '_,
+        Sqlite,
+        impl FnMut(SqliteRow) -> sqlx::Result<(Self::RowId, Self)> + Send,
+        SqliteArguments,
+    > {
+        sqlx::query(sql!(
+            "
+            SELECT
+                row_id,
+                id,
+                parents,
+                predecessors,
+                root_trees,
+                conflict_labels,
+                change_id,
+                description,
+                author_name,
+                author_email,
+                author_timestamp,
+                author_tz_offset,
+                committer_name,
+                committer_email,
+                committer_timestamp,
+                committer_tz_offset,
+                secure_sig_data,
+                secure_sig_sig
+            FROM commits
+            WHERE id = ?
+            "
+        ))
+        .bind(hash_id)
+        .try_map(|row| {
+            Ok((
+                row.try_get("row_id")?,
+                <CommitRaw as sqlx::FromRow<SqliteRow>>::from_row(&row)?.try_into()?,
+            ))
+        })
+    }
+}
+
+impl Model for CopyHistory {
+    const TABLE_NAME: &str = "copies";
+
+    type RowId = CopyHistoryRowId;
+    type HashId = CopyId;
+
+    fn hash_id(&self) -> &Self::HashId {
+        &self.id
+    }
+
+    fn insert_query(&self) -> sqlx::query::Query<'_, Sqlite, SqliteArguments> {
+        sqlx::query!(
+            "
+            INSERT INTO copies (
+                id,
+                generation,
+                current_path,
+                parents,
+                salt,
+                __last_written_ms
+            )
+            VALUES (?, ?, ?, ?, ?, unixepoch('now') * 1000)
+            ON CONFLICT(id) DO UPDATE
+            SET __last_written_ms = MAX(__last_written_ms, excluded.__last_written_ms)
+            ",
+            self.id,
+            self.generation,
+            self.current_path,
+            self.parents,
+            self.salt,
+        )
+    }
+
+    fn fetch_by_row_id_query(
+        row_id: Self::RowId,
+    ) -> sqlx::query::Map<
+        'static,
+        Sqlite,
+        impl FnMut(SqliteRow) -> sqlx::Result<Self>,
+        SqliteArguments,
+    > {
+        sqlx::query(sql!(
+            "
+            SELECT id, generation, current_path, parents, salt
+            FROM copies
+            WHERE row_id = ?
+            "
+        ))
+        .bind(row_id)
+        .try_map(|row| sqlx::FromRow::<SqliteRow>::from_row(&row))
+    }
+
+    fn fetch_by_hash_id_query(
+        hash_id: &Self::HashId,
+    ) -> sqlx::query::Map<
+        '_,
+        Sqlite,
+        impl FnMut(SqliteRow) -> sqlx::Result<(Self::RowId, Self)>,
+        SqliteArguments,
+    > {
+        sqlx::query(sql!(
+            "
+            SELECT row_id, id, generation, current_path, parents, salt
+            FROM copies
+            WHERE id = ?
+            "
+        ))
+        .bind(hash_id)
+        .try_map(|row| {
+            Ok((
+                row.try_get("row_id")?,
+                sqlx::FromRow::<SqliteRow>::from_row(&row)?,
+            ))
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use insta::assert_snapshot;
-
     use super::*;
-    use crate::hash::Hash;
+    use crate::SqlBackend;
+    use crate::model::test_model_roundtrip;
 
-    #[test]
-    fn schema() {
-        assert_snapshot!(SCHEMA);
-    }
-
-    fn setup() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(super::SCHEMA).unwrap();
-        conn
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_file_roundtrip() -> anyhow::Result<()> {
+        let backend = SqlBackend::init_in_memory().await?;
+        test_model_roundtrip::<File>(&backend.pool).await
     }
 
-    fn fid(b: u8) -> FileId {
-        FileId(Hash([b; COMMIT_ID_LENGTH]))
-    }
-    fn sid(b: u8) -> SymlinkId {
-        SymlinkId(Hash([b; COMMIT_ID_LENGTH]))
-    }
-    fn tid(b: u8) -> TreeId {
-        TreeId(Hash([b; COMMIT_ID_LENGTH]))
-    }
-    fn cid(b: u8) -> CommitId {
-        CommitId(Hash([b; COMMIT_ID_LENGTH]))
-    }
-    fn cpid(b: u8) -> CopyId {
-        CopyId(Hash([b; COMMIT_ID_LENGTH]))
-    }
-    fn chid(b: u8) -> ChangeId {
-        ChangeId(Hash([b; CHANGE_ID_LENGTH]))
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_symlink_roundtrip() -> anyhow::Result<()> {
+        let backend = SqlBackend::init_in_memory().await?;
+        test_model_roundtrip::<Symlink>(&backend.pool).await
     }
 
-    fn insert_file(conn: &Connection, id: FileId) -> FileRowId {
-        conn.insert(File {
-            id,
-            size: 0,
-            simhash: None,
-            compression_mode: CompressionMode::NONE,
-            compression_base_id: None,
-            compressed_data: vec![],
-        })
-        .unwrap()
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_tree_roundtrip() -> anyhow::Result<()> {
+        let backend = SqlBackend::init_in_memory().await?;
+        test_model_roundtrip::<Tree>(&backend.pool).await
     }
 
-    fn insert_symlink(conn: &Connection, id: SymlinkId) -> SymlinkRowId {
-        conn.insert(Symlink {
-            id,
-            target: "target".to_owned(),
-        })
-        .unwrap()
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_commit_roundtrip() -> anyhow::Result<()> {
+        let backend = SqlBackend::init_in_memory().await?;
+        test_model_roundtrip::<Commit>(&backend.pool).await
     }
 
-    fn insert_tree(conn: &Connection, id: TreeId, entries: TreeEntries) -> TreeRowId {
-        let blob = encode_tree_entries(&entries).unwrap();
-        conn.insert(Tree { id, entries: blob }).unwrap()
-    }
-
-    #[test]
-    fn tree_roundtrip() {
-        let conn = setup();
-        insert_tree(&conn, tid(3), TreeEntries::new());
-        assert!(Tree::get_by_id(&conn, &tid(3)).is_ok());
-        assert!(Tree::get_by_id(&conn, &tid(99)).is_err());
-    }
-
-    #[test]
-    fn tree_entries_roundtrip() {
-        let conn = setup();
-        let f_row = insert_file(&conn, fid(2));
-        let s_row = insert_symlink(&conn, sid(4));
-        let sub_row = insert_tree(&conn, tid(5), TreeEntries::new());
-        let entries = vec![
-            (
-                "a.txt".to_owned(),
-                TreeValue::File {
-                    row_id: f_row,
-                    executable: false,
-                    copy_id: None,
-                },
-            ),
-            ("link".to_owned(), TreeValue::Symlink(s_row)),
-            ("subdir".to_owned(), TreeValue::Tree(sub_row)),
-        ];
-        insert_tree(&conn, tid(1), entries.clone());
-        let (_, tree) = Tree::get_by_id(&conn, &tid(1)).unwrap();
-        let decoded = decode_tree_entries(&tree.entries).unwrap();
-        assert_eq!(decoded, entries);
-    }
-
-    #[test]
-    fn tree_entries_all_variants() {
-        let conn = setup();
-        let f_row = insert_file(&conn, fid(2));
-        let s_row = insert_symlink(&conn, sid(4));
-        let sub_row = insert_tree(&conn, tid(5), TreeEntries::new());
-        let c_row = conn.insert(make_commit(cid(6))).unwrap();
-
-        let entries = vec![
-            (
-                "exec.sh".to_owned(),
-                TreeValue::File {
-                    row_id: f_row,
-                    executable: true,
-                    copy_id: Some(cpid(9)),
-                },
-            ),
-            ("link".to_owned(), TreeValue::Symlink(s_row)),
-            ("subdir".to_owned(), TreeValue::Tree(sub_row)),
-            ("sub".to_owned(), TreeValue::Submodule(c_row)),
-        ];
-        let blob = encode_tree_entries(&entries).unwrap();
-        let decoded = decode_tree_entries(&blob).unwrap();
-        assert_eq!(decoded, entries);
-    }
-
-    fn make_commit(id: CommitId) -> Commit {
-        Commit {
-            id,
-            change_id: chid(1),
-            description: "desc".to_owned(),
-            author: Signature {
-                name: "Alice".to_owned(),
-                email: "alice@example.com".to_owned(),
-                timestamp: 1_000_000,
-                tz_offset: 0,
-            },
-            committer: Signature {
-                name: "Bob".to_owned(),
-                email: "bob@example.com".to_owned(),
-                timestamp: 2_000_000,
-                tz_offset: 60,
-            },
-            secure_sig: None,
-        }
-    }
-
-    #[test]
-    fn commit_root_trees_roundtrip() {
-        let conn = setup();
-        conn.insert(make_commit(cid(1))).unwrap();
-        // Flat Merge vec order: add0 at position 0, remove0 at position 1.
-        let rows = vec![
-            CommitRootTree {
-                commit_id: cid(1),
-                position: 0,
-                tree_id: tid(10),
-                conflict_label: String::new(),
-            },
-            CommitRootTree {
-                commit_id: cid(1),
-                position: 1,
-                tree_id: tid(11),
-                conflict_label: "base".to_owned(),
-            },
-        ];
-        for row in rows {
-            conn.insert(row).unwrap();
-        }
-        let got = CommitRootTree::get_all_for_commit(&conn, &cid(1)).unwrap();
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].tree_id, tid(10));
-        assert_eq!(got[0].conflict_label, String::new());
-        assert_eq!(got[1].tree_id, tid(11));
-        assert_eq!(got[1].conflict_label, "base");
-    }
-
-    #[test]
-    fn commit_parents_roundtrip() {
-        let conn = setup();
-        conn.insert(make_commit(cid(1))).unwrap();
-        conn.insert(CommitParent {
-            commit_id: cid(1),
-            position: 0,
-            parent_id: cid(2),
-        })
-        .unwrap();
-        conn.insert(CommitParent {
-            commit_id: cid(1),
-            position: 1,
-            parent_id: cid(3),
-        })
-        .unwrap();
-        let got = CommitParent::get_all_for_commit(&conn, &cid(1)).unwrap();
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].parent_id, cid(2));
-        assert_eq!(got[1].parent_id, cid(3));
-    }
-
-    #[test]
-    fn commit_predecessors_roundtrip() {
-        let conn = setup();
-        conn.insert(make_commit(cid(1))).unwrap();
-        conn.insert(CommitPredecessor {
-            commit_id: cid(1),
-            position: 0,
-            predecessor_id: cid(4),
-        })
-        .unwrap();
-        let got = CommitPredecessor::get_all_for_commit(&conn, &cid(1)).unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].predecessor_id, cid(4));
-    }
-
-    #[test]
-    fn copy_parents_roundtrip() {
-        let conn = setup();
-        conn.insert(CopyParent {
-            copy_id: cpid(1),
-            position: 0,
-            parent_id: cpid(2),
-        })
-        .unwrap();
-        conn.insert(CopyParent {
-            copy_id: cpid(1),
-            position: 1,
-            parent_id: cpid(3),
-        })
-        .unwrap();
-        let got = CopyParent::get_all_for_copy(&conn, &cpid(1)).unwrap();
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].parent_id, cpid(2));
-        assert_eq!(got[1].parent_id, cpid(3));
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_copy_roundtrip() -> anyhow::Result<()> {
+        let backend = SqlBackend::init_in_memory().await?;
+        test_model_roundtrip::<CopyHistory>(&backend.pool).await
     }
 }

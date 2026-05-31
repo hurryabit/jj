@@ -133,7 +133,8 @@ fn test_init_external_git() -> TestResult {
 #[test_case(TestRepoBackend::Simple ; "simple backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
 #[test_case(TestRepoBackend::Sql ; "sql backend")]
-fn test_init_with_default_config(backend: TestRepoBackend) -> TestResult {
+#[tokio::test(flavor = "multi_thread")]
+async fn test_init_with_default_config(backend: TestRepoBackend) -> TestResult {
     // Test that we can create a repo without setting any non-default config
     let settings = UserSettings::from_config(StackedConfig::with_defaults())?;
     let test_workspace = TestWorkspace::init_with_backend_and_settings(backend, &settings);
@@ -153,7 +154,8 @@ fn test_init_with_default_config(backend: TestRepoBackend) -> TestResult {
 #[test_case(TestRepoBackend::Simple ; "simple backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
 #[test_case(TestRepoBackend::Sql ; "sql backend")]
-fn test_init_checkout(backend: TestRepoBackend) -> TestResult {
+#[tokio::test(flavor = "multi_thread")]
+async fn test_init_checkout(backend: TestRepoBackend) -> TestResult {
     // Test the contents of the working-copy commit after init
     let settings = testutils::user_settings();
     let test_workspace = TestWorkspace::init_with_backend_and_settings(backend, &settings);

@@ -48,6 +48,7 @@ use jj_lib::settings::UserSettings;
 use jj_lib::signing::Signer;
 use jj_lib::workspace::Workspace;
 use jj_lib::workspace::WorkspaceInitError;
+use pollster::FutureExt as _;
 
 #[derive(clap::Parser, Clone, Debug)]
 enum CustomCommand {
@@ -93,6 +94,7 @@ fn main() -> std::process::ExitCode {
         .add_store_factories(create_store_factories())
         .add_subcommand(run_custom_command)
         .run()
+        .block_on()
         .into()
 }
 

@@ -1,0 +1,3 @@
+CREATE TABLE op_heads (
+    id BLOB NOT NULL PRIMARY KEY
+);

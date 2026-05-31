@@ -32,7 +32,6 @@ use jj_lib::revset::RevsetEvaluationError;
 use jj_lib::settings::UserSettings;
 use jj_lib::store::Store;
 use jj_sql_lib::SqlBackend;
-use pollster::FutureExt as _;
 use tempfile::TempDir;
 
 fn user_settings() -> UserSettings {
@@ -48,12 +47,14 @@ fn user_settings() -> UserSettings {
     UserSettings::from_config(config).unwrap()
 }
 
-fn setup() -> (TempDir, SqlBackend) {
+async fn setup() -> (TempDir, SqlBackend) {
     let dir = tempfile::Builder::new()
         .prefix("jj-sql-test-")
         .tempdir()
         .unwrap();
-    let backend = SqlBackend::init(&user_settings(), dir.path()).unwrap();
+    let backend = SqlBackend::init(&user_settings(), dir.path())
+        .await
+        .unwrap();
     (dir, backend)
 }
 
@@ -61,30 +62,31 @@ fn repo_path(s: &str) -> RepoPathBuf {
     RepoPathBuf::from_internal_string(s).unwrap()
 }
 
-fn write_copy(backend: &SqlBackend, current_path: &str, parents: Vec<CopyId>) -> CopyId {
+async fn write_copy(backend: &SqlBackend, current_path: &str, parents: Vec<CopyId>) -> CopyId {
     backend
         .write_copy(&CopyHistory {
             current_path: repo_path(current_path),
             parents,
             salt: vec![],
         })
-        .block_on()
+        .await
         .unwrap()
 }
 
 // Round-trip: fields survive a write/read cycle.
-#[test]
-fn test_copy_round_trip() {
-    let (_dir, backend) = setup();
+#[tokio::test]
+async fn test_copy_round_trip() {
+    let (_dir, backend) = setup().await;
 
-    let parent1 = write_copy(&backend, "old/a.rs", vec![]);
-    let parent2 = write_copy(&backend, "old/b.rs", vec![]);
+    let parent1 = write_copy(&backend, "old/a.rs", vec![]).await;
+    let parent2 = write_copy(&backend, "old/b.rs", vec![]).await;
     let id = write_copy(
         &backend,
         "foo/bar.rs",
         vec![parent1.clone(), parent2.clone()],
-    );
-    let history = backend.read_copy(&id).block_on().unwrap();
+    )
+    .await;
+    let history = backend.read_copy(&id).await.unwrap();
 
     assert_eq!(history.current_path, repo_path("foo/bar.rs"));
     assert_eq!(history.parents, vec![parent1, parent2]);
@@ -99,16 +101,16 @@ fn test_copy_round_trip() {
 //
 // Starting from C: ancestors = {A}, descendants of {A} = {C, D}.
 // B is a parent of D but not an ancestor of C, so it must be excluded.
-#[test]
-fn test_get_related_copies_excludes_unrelated() {
-    let (_dir, backend) = setup();
+#[tokio::test]
+async fn test_get_related_copies_excludes_unrelated() {
+    let (_dir, backend) = setup().await;
 
-    let a = write_copy(&backend, "a", vec![]);
-    let b = write_copy(&backend, "b", vec![]);
-    let c = write_copy(&backend, "c", vec![a.clone()]);
-    let d = write_copy(&backend, "d", vec![a.clone(), b.clone()]);
+    let a = write_copy(&backend, "a", vec![]).await;
+    let b = write_copy(&backend, "b", vec![]).await;
+    let c = write_copy(&backend, "c", vec![a.clone()]).await;
+    let d = write_copy(&backend, "d", vec![a.clone(), b.clone()]).await;
 
-    let related = backend.get_related_copies(&c).block_on().unwrap();
+    let related = backend.get_related_copies(&c).await.unwrap();
     let ids: Vec<CopyId> = related.into_iter().map(|rc| rc.id).collect();
 
     assert!(ids.contains(&a), "a (ancestor of c) must be included");
@@ -123,15 +125,15 @@ fn test_get_related_copies_excludes_unrelated() {
 // get_related_copies must return children before parents (trait contract).
 //
 // Graph: leaf → middle → root
-#[test]
-fn test_get_related_copies_children_before_parents() {
-    let (_dir, backend) = setup();
+#[tokio::test]
+async fn test_get_related_copies_children_before_parents() {
+    let (_dir, backend) = setup().await;
 
-    let root = write_copy(&backend, "root", vec![]);
-    let middle = write_copy(&backend, "middle", vec![root.clone()]);
-    let leaf = write_copy(&backend, "leaf", vec![middle.clone()]);
+    let root = write_copy(&backend, "root", vec![]).await;
+    let middle = write_copy(&backend, "middle", vec![root.clone()]).await;
+    let leaf = write_copy(&backend, "leaf", vec![middle.clone()]).await;
 
-    let related = backend.get_related_copies(&leaf).block_on().unwrap();
+    let related = backend.get_related_copies(&leaf).await.unwrap();
     let ids: Vec<CopyId> = related.into_iter().map(|rc| rc.id).collect();
     let pos = |id: &CopyId| ids.iter().position(|x| x == id).unwrap();
 
@@ -195,22 +197,22 @@ fn make_signature() -> Signature {
     }
 }
 
-fn write_empty_tree(backend: &SqlBackend) -> TreeId {
+async fn write_empty_tree(backend: &SqlBackend) -> TreeId {
     backend
         .write_tree(RepoPath::root(), &Tree::from_sorted_entries(vec![]))
-        .block_on()
+        .await
         .unwrap()
 }
 
-fn write_file(backend: &SqlBackend, content: &[u8]) -> FileId {
+async fn write_file(backend: &SqlBackend, content: &[u8]) -> FileId {
     let mut cursor = futures::io::Cursor::new(content.to_vec());
     backend
         .write_file(RepoPath::root(), &mut cursor)
-        .block_on()
+        .await
         .unwrap()
 }
 
-fn write_tree_with_file(backend: &SqlBackend, file_name: &str, file_id: FileId) -> TreeId {
+async fn write_tree_with_file(backend: &SqlBackend, file_name: &str, file_id: FileId) -> TreeId {
     let entry = (
         RepoPathComponentBuf::new(file_name).unwrap(),
         TreeValue::File {
@@ -221,13 +223,13 @@ fn write_tree_with_file(backend: &SqlBackend, file_name: &str, file_id: FileId) 
     );
     backend
         .write_tree(RepoPath::root(), &Tree::from_sorted_entries(vec![entry]))
-        .block_on()
+        .await
         .unwrap()
 }
 
 /// Writes a commit with a `tag` baked into the description so that commits
 /// with different tags always get distinct content-addressed IDs.
-fn write_commit(
+async fn write_commit(
     backend: &SqlBackend,
     tag: &str,
     parent_ids: Vec<CommitId>,
@@ -244,7 +246,7 @@ fn write_commit(
         committer: make_signature(),
         secure_sig: None,
     };
-    let (id, _) = backend.write_commit(commit, None).block_on().unwrap();
+    let (id, _) = backend.write_commit(commit, None).await.unwrap();
     id
 }
 
@@ -267,62 +269,62 @@ fn gc_keep_recent(backend: &SqlBackend, head_ids: Vec<CommitId>) {
 
 // ── GC tests (through the public API) ────────────────────────────────────────
 
-#[test]
-fn test_gc_keeps_reachable_commits() {
-    let (_dir, backend) = setup();
+#[tokio::test(flavor = "multi_thread")]
+async fn test_gc_keeps_reachable_commits() {
+    let (_dir, backend) = setup().await;
     let root = backend.root_commit_id().clone();
-    let tree = write_empty_tree(&backend);
+    let tree = write_empty_tree(&backend).await;
 
-    let commit_a = write_commit(&backend, "a", vec![root.clone()], tree.clone());
-    let commit_b = write_commit(&backend, "b", vec![commit_a.clone()], tree.clone());
-    let commit_c = write_commit(&backend, "c", vec![commit_b.clone()], tree);
+    let commit_a = write_commit(&backend, "a", vec![root.clone()], tree.clone()).await;
+    let commit_b = write_commit(&backend, "b", vec![commit_a.clone()], tree.clone()).await;
+    let commit_c = write_commit(&backend, "c", vec![commit_b.clone()], tree).await;
 
     gc_delete_old(&backend, vec![commit_c.clone()]);
 
-    backend.read_commit(&commit_a).block_on().unwrap();
-    backend.read_commit(&commit_b).block_on().unwrap();
-    backend.read_commit(&commit_c).block_on().unwrap();
+    backend.read_commit(&commit_a).await.unwrap();
+    backend.read_commit(&commit_b).await.unwrap();
+    backend.read_commit(&commit_c).await.unwrap();
 }
 
-#[test]
-fn test_gc_deletes_unreachable_old_commits() {
-    let (_dir, backend) = setup();
+#[tokio::test(flavor = "multi_thread")]
+async fn test_gc_deletes_unreachable_old_commits() {
+    let (_dir, backend) = setup().await;
     let root = backend.root_commit_id().clone();
-    let tree = write_empty_tree(&backend);
+    let tree = write_empty_tree(&backend).await;
 
     // A ← B (head); A ← C (unreachable).
-    let commit_a = write_commit(&backend, "a", vec![root.clone()], tree.clone());
-    let commit_b = write_commit(&backend, "b", vec![commit_a.clone()], tree.clone());
-    let commit_c = write_commit(&backend, "c", vec![commit_a.clone()], tree);
+    let commit_a = write_commit(&backend, "a", vec![root.clone()], tree.clone()).await;
+    let commit_b = write_commit(&backend, "b", vec![commit_a.clone()], tree.clone()).await;
+    let commit_c = write_commit(&backend, "c", vec![commit_a.clone()], tree).await;
 
     gc_delete_old(&backend, vec![commit_b.clone()]);
 
-    backend.read_commit(&commit_a).block_on().unwrap();
-    backend.read_commit(&commit_b).block_on().unwrap();
-    assert!(backend.read_commit(&commit_c).block_on().is_err());
+    backend.read_commit(&commit_a).await.unwrap();
+    backend.read_commit(&commit_b).await.unwrap();
+    assert!(backend.read_commit(&commit_c).await.is_err());
 }
 
-#[test]
-fn test_gc_keeps_recent_unreachable_commits() {
-    let (_dir, backend) = setup();
+#[tokio::test(flavor = "multi_thread")]
+async fn test_gc_keeps_recent_unreachable_commits() {
+    let (_dir, backend) = setup().await;
     let root = backend.root_commit_id().clone();
-    let tree = write_empty_tree(&backend);
+    let tree = write_empty_tree(&backend).await;
 
-    let commit_a = write_commit(&backend, "a", vec![root.clone()], tree.clone());
-    let commit_b = write_commit(&backend, "b", vec![commit_a.clone()], tree.clone());
-    let commit_c = write_commit(&backend, "c", vec![commit_a.clone()], tree);
+    let commit_a = write_commit(&backend, "a", vec![root.clone()], tree.clone()).await;
+    let commit_b = write_commit(&backend, "b", vec![commit_a.clone()], tree.clone()).await;
+    let commit_c = write_commit(&backend, "c", vec![commit_a.clone()], tree).await;
 
     // keep_newer = UNIX_EPOCH means nothing qualifies as "old" → nothing deleted.
     gc_keep_recent(&backend, vec![commit_b.clone()]);
 
-    backend.read_commit(&commit_a).block_on().unwrap();
-    backend.read_commit(&commit_b).block_on().unwrap();
-    backend.read_commit(&commit_c).block_on().unwrap();
+    backend.read_commit(&commit_a).await.unwrap();
+    backend.read_commit(&commit_b).await.unwrap();
+    backend.read_commit(&commit_c).await.unwrap();
 }
 
-#[test]
-fn test_gc_always_keeps_empty_tree() {
-    let (_dir, backend) = setup();
+#[tokio::test(flavor = "multi_thread")]
+async fn test_gc_always_keeps_empty_tree() {
+    let (_dir, backend) = setup().await;
     let empty_tree_id = backend.empty_tree_id().clone();
 
     // No heads — GC with nothing reachable.
@@ -330,70 +332,54 @@ fn test_gc_always_keeps_empty_tree() {
 
     backend
         .read_tree(RepoPath::root(), &empty_tree_id)
-        .block_on()
+        .await
         .unwrap();
 }
 
-#[test]
-fn test_gc_keeps_tree_and_file_for_reachable_commit() {
-    let (_dir, backend) = setup();
+#[tokio::test(flavor = "multi_thread")]
+async fn test_gc_keeps_tree_and_file_for_reachable_commit() {
+    let (_dir, backend) = setup().await;
     let root = backend.root_commit_id().clone();
 
-    let file_id = write_file(&backend, b"hello");
-    let tree_id = write_tree_with_file(&backend, "hello.txt", file_id.clone());
-    let commit_id = write_commit(&backend, "a", vec![root], tree_id.clone());
+    let file_id = write_file(&backend, b"hello").await;
+    let tree_id = write_tree_with_file(&backend, "hello.txt", file_id.clone()).await;
+    let commit_id = write_commit(&backend, "a", vec![root], tree_id.clone()).await;
 
     gc_delete_old(&backend, vec![commit_id.clone()]);
 
-    backend.read_commit(&commit_id).block_on().unwrap();
-    backend
-        .read_tree(RepoPath::root(), &tree_id)
-        .block_on()
-        .unwrap();
-    backend
-        .read_file(RepoPath::root(), &file_id)
-        .block_on()
-        .unwrap();
+    backend.read_commit(&commit_id).await.unwrap();
+    backend.read_tree(RepoPath::root(), &tree_id).await.unwrap();
+    backend.read_file(RepoPath::root(), &file_id).await.unwrap();
 }
 
-#[test]
-fn test_gc_deletes_orphaned_tree_and_file() {
-    let (_dir, backend) = setup();
+#[tokio::test(flavor = "multi_thread")]
+async fn test_gc_deletes_orphaned_tree_and_file() {
+    let (_dir, backend) = setup().await;
 
     // Write a file and tree but no commit referencing them.
-    let file_id = write_file(&backend, b"orphan");
-    let tree_id = write_tree_with_file(&backend, "orphan.txt", file_id.clone());
+    let file_id = write_file(&backend, b"orphan").await;
+    let tree_id = write_tree_with_file(&backend, "orphan.txt", file_id.clone()).await;
 
     gc_delete_old(&backend, vec![]);
 
-    assert!(
-        backend
-            .read_tree(RepoPath::root(), &tree_id)
-            .block_on()
-            .is_err()
-    );
-    assert!(
-        backend
-            .read_file(RepoPath::root(), &file_id)
-            .block_on()
-            .is_err()
-    );
+    assert!(backend.read_tree(RepoPath::root(), &tree_id).await.is_err());
+    assert!(backend.read_file(RepoPath::root(), &file_id).await.is_err());
 }
 
 // Diamond: both branches must appear before their shared ancestor.
 //
 // Graph: d → b → a
 //        d → c → a
-#[test]
-fn test_get_related_copies_diamond_order() {
-    let (_dir, backend) = setup();
+#[tokio::test]
+async fn test_get_related_copies_diamond_order() {
+    let (_dir, backend) = setup().await;
 
-    let a = write_copy(&backend, "a", vec![]);
-    let b = write_copy(&backend, "b", vec![a.clone()]);
-    let c = write_copy(&backend, "c", vec![a.clone()]);
-    let d = write_copy(&backend, "d", vec![b.clone(), c.clone()]);
+    let a = write_copy(&backend, "a", vec![]).await;
+    let b = write_copy(&backend, "b", vec![a.clone()]).await;
+    let c = write_copy(&backend, "c", vec![a.clone()]).await;
+    let d = write_copy(&backend, "d", vec![b.clone(), c.clone()]).await;
 
-    let related = backend.get_related_copies(&d).block_on().unwrap();
+    let related = backend.get_related_copies(&d).await.unwrap();
     let ids: Vec<CopyId> = related.into_iter().map(|rc| rc.id).collect();
     let pos = |id: &CopyId| ids.iter().position(|x| x == id).unwrap();
 

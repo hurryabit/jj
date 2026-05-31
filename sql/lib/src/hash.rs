@@ -1,26 +1,25 @@
 use jj_lib::hex_util::decode_hex;
 use jj_lib::hex_util::encode_hex;
+use sqlx::Database;
+use sqlx::Sqlite;
+use sqlx::error::BoxDynError;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, zerocopy::IntoBytes, zerocopy::Immutable)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    proptest_derive::Arbitrary,
+    zerocopy::FromBytes,
+    zerocopy::Immutable,
+    zerocopy::IntoBytes,
+)]
 #[repr(transparent)]
 pub struct Hash<const N: usize>(pub [u8; N]);
-
-impl<const N: usize> rusqlite::ToSql for Hash<N> {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-        self.0.to_sql()
-    }
-}
-
-impl<const N: usize> rusqlite::types::FromSql for Hash<N> {
-    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
-        <[u8; N]>::column_result(value).map(Hash)
-    }
-}
-
-impl<const N: usize> balsaq::Column for Hash<N> {
-    const SQL_TYPE: &'static str = <[u8; N]>::SQL_TYPE;
-    const NULLABLE: bool = <[u8; N]>::NULLABLE;
-}
 
 impl<const N: usize> serde::Serialize for Hash<N> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -50,6 +49,29 @@ impl<'de, const N: usize> serde::Deserialize<'de> for Hash<N> {
             ));
         };
         Ok(Hash(array))
+    }
+}
+
+impl<'r, const N: usize> sqlx::Decode<'r, Sqlite> for Hash<N> {
+    fn decode(value: <Sqlite as Database>::ValueRef<'r>) -> Result<Self, BoxDynError> {
+        Ok(Self(
+            <&[u8] as sqlx::Decode<Sqlite>>::decode(value)?.try_into()?,
+        ))
+    }
+}
+
+impl<'q, const N: usize> sqlx::Encode<'q, Sqlite> for Hash<N> {
+    fn encode_by_ref(
+        &self,
+        buf: &mut <Sqlite as Database>::ArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, BoxDynError> {
+        <&[u8] as sqlx::Encode<Sqlite>>::encode_by_ref(&&self.0[..], buf)
+    }
+}
+
+impl<const N: usize> sqlx::Type<Sqlite> for Hash<N> {
+    fn type_info() -> <Sqlite as Database>::TypeInfo {
+        <&[u8] as sqlx::Type<Sqlite>>::type_info()
     }
 }
 

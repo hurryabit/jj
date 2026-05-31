@@ -71,17 +71,30 @@ fn create_store_factories() -> StoreFactories {
     // which is what jj writes into the `type` file on init.
     store_factories.add_backend(
         SqlBackend::name(),
-        Box::new(|settings, store_path| Ok(Box::new(SqlBackend::load(settings, store_path)?))),
+        Box::new(|settings, store_path| {
+            let backend = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(SqlBackend::load(settings, store_path))
+            })?;
+            Ok(Box::new(backend))
+        }),
     );
     store_factories.add_op_store(
         SqlOpStore::name(),
         Box::new(|_settings, store_path, root_data| {
-            Ok(Box::new(SqlOpStore::load(store_path, root_data)?))
+            let op_store = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(SqlOpStore::load(store_path, root_data))
+            })?;
+            Ok(Box::new(op_store))
         }),
     );
     store_factories.add_op_heads_store(
         SqlOpHeadsStore::name(),
-        Box::new(|_settings, store_path| Ok(Box::new(SqlOpHeadsStore::load(store_path)?))),
+        Box::new(|_settings, store_path| {
+            let op_heads = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(SqlOpHeadsStore::load(store_path))
+            })?;
+            Ok(Box::new(op_heads))
+        }),
     );
     store_factories
 }
@@ -95,7 +108,7 @@ async fn run_stats(
     let Some(backend) = workspace.repo().store().backend_impl::<SqlBackend>() else {
         return Err(internal_error("not a SQL-backed repository"));
     };
-    let stats = backend.stats().map_err(internal_error)?;
+    let stats = backend.files_stats().await.map_err(internal_error)?;
     writeln!(ui.stdout(), "Commits:              {:>12}", stats.commits)?;
     writeln!(ui.stdout(), "Trees:                {:>12}", stats.trees)?;
     writeln!(ui.stdout(), "Blobs:                {:>12}", stats.blobs)?;
@@ -115,7 +128,7 @@ async fn run_stats(
         ByteSize(stats.db_size_bytes),
     )?;
     if args.db {
-        let db_stats = backend.db_stats().map_err(internal_error)?;
+        let db_stats = backend.db_table_stats().await.map_err(internal_error)?;
         let name_width = db_stats
             .iter()
             .map(|r| r.name.len())
@@ -126,7 +139,10 @@ async fn run_stats(
         writeln!(
             ui.stdout(),
             "{:<name_width$} {:>12}  {:>10}  {:>10}",
-            "Table", "Payload", "Rows", "Cells",
+            "Table",
+            "Payload",
+            "Rows",
+            "Cells",
         )?;
         writeln!(ui.stdout(), "{}", "-".repeat(name_width + 40))?;
         for row in &db_stats {
@@ -175,13 +191,27 @@ async fn run_sql_command(
             Workspace::init_with_factories(
                 &settings,
                 wc_path,
-                &|settings, store_path| Ok(Box::new(SqlBackend::init(settings, store_path)?)),
+                &|settings, store_path| {
+                    let backend = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(SqlBackend::init(settings, store_path))
+                    })?;
+                    Ok(Box::new(backend))
+                },
                 Signer::from_settings(&settings).map_err(WorkspaceInitError::SignInit)?,
                 &|_settings, store_path, root_data| {
-                    Ok(Box::new(SqlOpStore::init(store_path, root_data)?))
+                    let op_store = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(SqlOpStore::init(store_path, root_data))
+                    })?;
+                    Ok(Box::new(op_store))
                 },
                 &|_settings, store_path, root_op_id| {
-                    Ok(Box::new(SqlOpHeadsStore::init(store_path, root_op_id)?))
+                    let op_heads = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(SqlOpHeadsStore::init(store_path, root_op_id))
+                    })?;
+                    Ok(Box::new(op_heads))
                 },
                 ReadonlyRepo::default_index_store_initializer(),
                 ReadonlyRepo::default_submodule_store_initializer(),
@@ -194,7 +224,8 @@ async fn run_sql_command(
     }
 }
 
-fn main() -> std::process::ExitCode {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> std::process::ExitCode {
     CliRunner::init()
         .name("jj")
         .about("Jujitsu with experimental SQLite backend")
@@ -202,5 +233,6 @@ fn main() -> std::process::ExitCode {
         .add_store_factories(create_store_factories())
         .add_subcommand(run_sql_command)
         .run()
+        .await
         .into()
 }

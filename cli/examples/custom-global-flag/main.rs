@@ -17,6 +17,7 @@ use std::io::Write as _;
 use jj_cli::cli_util::CliRunner;
 use jj_cli::command_error::CommandError;
 use jj_cli::ui::Ui;
+use pollster::FutureExt as _;
 
 #[derive(clap::Args, Clone, Debug)]
 struct CustomGlobalArgs {
@@ -36,5 +37,6 @@ fn main() -> std::process::ExitCode {
     CliRunner::init()
         .add_global_args(process_before)
         .run()
+        .block_on()
         .into()
 }

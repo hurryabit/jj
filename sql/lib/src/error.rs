@@ -3,16 +3,19 @@ use std::num::TryFromIntError;
 use jj_lib::backend::BackendError;
 use jj_lib::backend::BackendInitError;
 use jj_lib::backend::BackendLoadError;
+use jj_lib::index::IndexError;
 use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::OpStoreError;
 use jj_lib::repo_path::InvalidNewRepoPathError;
+
+pub type SqlBackendResult<T> = Result<T, SqlBackendError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SqlBackendError {
     #[error("IO error")]
     IoError(#[from] std::io::Error),
-    #[error("SQL error")]
-    SqlError(#[from] rusqlite::Error),
+    #[error("SQLx error")]
+    SqlxError(#[from] sqlx::Error),
     #[error("JSON error")]
     JsonError(#[from] serde_json::Error),
     #[error("Encoding error")]
@@ -29,6 +32,8 @@ pub enum SqlBackendError {
     },
     #[error(transparent)]
     InvalidNewRepoPathError(#[from] InvalidNewRepoPathError),
+    #[error(transparent)]
+    IndexError(#[from] IndexError),
     #[error(transparent)]
     Other(Box<dyn std::error::Error + Send + Sync>),
     #[error("Internal error: {0}")]
@@ -106,13 +111,11 @@ impl From<SqlBackendError> for BackendError {
                 hash,
                 source,
             } => match *source {
-                SqlBackendError::SqlError(rusqlite::Error::QueryReturnedNoRows) => {
-                    Self::ObjectNotFound {
-                        object_type,
-                        hash,
-                        source,
-                    }
-                }
+                SqlBackendError::SqlxError(sqlx::Error::RowNotFound) => Self::ObjectNotFound {
+                    object_type,
+                    hash,
+                    source,
+                },
                 _ => Self::ReadObject {
                     object_type,
                     hash,
@@ -139,13 +142,11 @@ impl From<SqlBackendError> for OpStoreError {
                 hash,
                 source,
             } => match *source {
-                SqlBackendError::SqlError(rusqlite::Error::QueryReturnedNoRows) => {
-                    Self::ObjectNotFound {
-                        object_type,
-                        hash,
-                        source,
-                    }
-                }
+                SqlBackendError::SqlxError(sqlx::Error::RowNotFound) => Self::ObjectNotFound {
+                    object_type,
+                    hash,
+                    source,
+                },
                 _ => Self::ReadObject {
                     object_type,
                     hash,

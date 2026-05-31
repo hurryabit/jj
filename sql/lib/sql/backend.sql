@@ -1,7 +1,3 @@
----
-source: sql/lib/src/backend/model.rs
-expression: SCHEMA
----
 CREATE TABLE IF NOT EXISTS files (
     row_id INTEGER PRIMARY KEY,
     id BLOB NOT NULL UNIQUE,

@@ -145,7 +145,8 @@ fn test_root() -> TestResult {
 #[test_case(TestRepoBackend::Simple ; "simple backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
 #[test_case(TestRepoBackend::Sql ; "sql backend")]
-fn test_checkout_file_transitions(backend: TestRepoBackend) -> TestResult {
+#[tokio::test(flavor = "multi_thread")]
+async fn test_checkout_file_transitions(backend: TestRepoBackend) -> TestResult {
     // Tests switching between commits where a certain path is of one type in one
     // commit and another type in the other. Includes a "missing" type, so we cover
     // additions and removals as well.
@@ -170,7 +171,7 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) -> TestResult {
         GitSubmodule,
     }
 
-    fn write_path(
+    async fn write_path(
         repo: &Arc<ReadonlyRepo>,
         tree_builder: &mut MergedTreeBuilder,
         kind: Kind,
@@ -256,7 +257,7 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) -> TestResult {
                 )
             }
             Kind::Symlink => {
-                let id = store.write_symlink(path, "target").block_on().unwrap();
+                let id = store.write_symlink(path, "target").await.unwrap();
                 Merge::normal(TreeValue::Symlink(id))
             }
             Kind::Tree => {
@@ -273,7 +274,7 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) -> TestResult {
             Kind::GitSubmodule => {
                 let mut tx = repo.start_transaction();
                 let id = write_random_commit(tx.repo_mut()).id().clone();
-                tx.commit("test").block_on().unwrap();
+                tx.commit("test").await.unwrap();
                 Merge::normal(TreeValue::GitSubmodule(id))
             }
         };
@@ -299,21 +300,21 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) -> TestResult {
     for left_kind in &kinds {
         for right_kind in &kinds {
             let path = repo_path_buf(format!("{left_kind:?}_{right_kind:?}"));
-            write_path(repo, &mut left_tree_builder, *left_kind, &path);
-            write_path(repo, &mut right_tree_builder, *right_kind, &path);
+            write_path(repo, &mut left_tree_builder, *left_kind, &path).await;
+            write_path(repo, &mut right_tree_builder, *right_kind, &path).await;
             files.push((*left_kind, *right_kind, path.clone()));
         }
     }
-    let left_tree = left_tree_builder.write_tree().block_on()?;
-    let right_tree = right_tree_builder.write_tree().block_on()?;
+    let left_tree = left_tree_builder.write_tree().await?;
+    let right_tree = right_tree_builder.write_tree().await?;
     let left_commit = commit_with_tree(&store, left_tree);
     let right_commit = commit_with_tree(&store, right_tree.clone());
 
     let ws = &mut test_workspace.workspace;
     ws.check_out(repo.op_id().clone(), None, &left_commit)
-        .block_on()?;
+        .await?;
     ws.check_out(repo.op_id().clone(), None, &right_commit)
-        .block_on()?;
+        .await?;
 
     // Check that the working copy is clean.
     let new_tree = test_workspace.snapshot()?;

@@ -1,7 +1,3 @@
----
-source: sql/lib/src/op_store/model.rs
-expression: SCHEMA
----
 CREATE TABLE IF NOT EXISTS views (
     row_id INTEGER PRIMARY KEY,
     id BLOB NOT NULL UNIQUE,

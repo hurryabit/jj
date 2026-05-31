@@ -1,12 +1,14 @@
 use std::fs;
 
-use pollster::FutureExt as _;
+use jj_sql_macro::sql;
+use sqlx::Row as _;
+use sqlx::sqlite::SqliteRow;
 
-use crate::error::SqlBackendError;
+use crate::error::SqlBackendResult;
 
 /// Repository statistics gathered from the SQL store.
 #[derive(Debug, Clone)]
-pub struct Stats {
+pub struct FilesStats {
     /// Number of commit objects.
     pub commits: i64,
     /// Number of tree objects.
@@ -22,7 +24,7 @@ pub struct Stats {
 }
 
 /// Per-table storage statistics from the SQLite `dbstat` virtual table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbTableStats {
     /// Table or index name.
     pub name: String,
@@ -35,25 +37,32 @@ pub struct DbTableStats {
 }
 
 impl super::SqlBackend {
-    pub fn stats(&self) -> Result<Stats, SqlBackendError> {
-        let conn = self.db.lock().block_on();
-        let commits = conn.query_row("SELECT COUNT(*) FROM commits", (), |r| r.get(0))?;
-        let trees = conn.query_row("SELECT COUNT(*) FROM trees", (), |r| r.get(0))?;
-        #[rustfmt::skip]
-        let (blobs, blob_compressed_bytes, blob_uncompressed_bytes) = conn.query_row(
-            "SELECT COUNT(*), \
-                    COALESCE(SUM(LENGTH(compressed_data)), 0), \
-                    COALESCE(SUM(size), 0) \
-             FROM files",
-            (),
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+    pub async fn files_stats(&self) -> SqlBackendResult<FilesStats> {
+        let mut conn = self.conn().await?;
+        let commits = sqlx::query_scalar!("SELECT COUNT(*) FROM commits")
+            .fetch_one(&mut *conn)
+            .await?;
+        let trees = sqlx::query_scalar!("SELECT COUNT(*) FROM trees")
+            .fetch_one(&mut *conn)
+            .await?;
+        let (blobs, blob_compressed_bytes, blob_uncompressed_bytes) = sqlx::query(sql!(
+            "
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(LENGTH(compressed_data)), 0),
+                COALESCE(SUM(size), 0)
+            FROM files
+            "
+        ))
+        .try_map(|row: SqliteRow| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
+        .fetch_one(&mut *conn)
+        .await?;
         let db_size_bytes = ["backend.db3", "backend.db3-wal", "backend.db3-shm"]
             .iter()
             .filter_map(|name| fs::metadata(self.path.join(name)).ok())
             .map(|m| m.len())
             .sum();
-        Ok(Stats {
+        Ok(FilesStats {
             commits,
             trees,
             blobs,
@@ -63,29 +72,35 @@ impl super::SqlBackend {
         })
     }
 
-    pub fn db_stats(&self) -> Result<Vec<DbTableStats>, SqlBackendError> {
-        let conn = self.db.lock().block_on();
-        #[rustfmt::skip]
-        let mut stmt = conn.prepare("\
-                SELECT \
-                    name, \
-                    SUM(payload) AS payload_bytes, \
-                    SUM(CASE WHEN pagetype = 'leaf' THEN ncell ELSE 0 END) AS rows,\
-                    SUM(ncell) AS cells \
-                FROM dbstat \
-                GROUP BY name \
-                ORDER BY payload_bytes DESC \
-            ")?;
-        let rows = stmt
-            .query_map((), |r| {
-                Ok(DbTableStats {
-                    name: r.get(0)?,
-                    payload_bytes: r.get(1)?,
-                    rows: r.get(2)?,
-                    cells: r.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+    pub async fn db_table_stats(&self) -> SqlBackendResult<Vec<DbTableStats>> {
+        let mut conn = self.conn().await?;
+        let rows = sqlx::query_as(sql!(
+            "
+            SELECT
+                name,
+                SUM(payload) AS payload_bytes,
+                SUM(CASE WHEN pagetype = 'leaf' THEN ncell ELSE 0 END) AS rows,\
+                SUM(ncell) AS cells
+            FROM dbstat
+            GROUP BY name
+            ORDER BY payload_bytes DESC
+            "
+        ))
+        .fetch_all(&mut *conn)
+        .await?;
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::SqlBackend;
+
+    #[tokio::test]
+    async fn test_stats_dont_crash() -> anyhow::Result<()> {
+        let backend = SqlBackend::init_in_memory().await?;
+        backend.files_stats().await?;
+        backend.db_table_stats().await?;
+        Ok(())
     }
 }

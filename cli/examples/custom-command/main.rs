@@ -19,6 +19,7 @@ use jj_cli::cli_util::CommandHelper;
 use jj_cli::cli_util::RevisionArg;
 use jj_cli::command_error::CommandError;
 use jj_cli::ui::Ui;
+use pollster::FutureExt as _;
 
 #[derive(clap::Parser, Clone, Debug)]
 enum CustomCommand {
@@ -66,5 +67,6 @@ fn main() -> std::process::ExitCode {
     CliRunner::init()
         .add_subcommand(run_custom_command)
         .run()
+        .block_on()
         .into()
 }

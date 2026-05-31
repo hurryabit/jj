@@ -204,5 +204,6 @@ fn main() -> std::process::ExitCode {
         .add_revset_function_extension("even_digits", even_digits)
         .add_commit_template_extension(Box::new(HexCounter))
         .run()
+        .block_on()
         .into()
 }

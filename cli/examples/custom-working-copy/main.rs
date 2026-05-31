@@ -49,6 +49,7 @@ use jj_lib::working_copy::WorkingCopyStateError;
 use jj_lib::workspace::WorkingCopyFactories;
 use jj_lib::workspace::Workspace;
 use jj_lib::workspace::WorkspaceInitError;
+use pollster::FutureExt as _;
 
 #[derive(clap::Parser, Clone, Debug)]
 enum CustomCommand {
@@ -98,6 +99,7 @@ fn main() -> std::process::ExitCode {
         .add_working_copy_factories(working_copy_factories)
         .add_subcommand(run_custom_command)
         .run()
+        .block_on()
         .into()
 }
 

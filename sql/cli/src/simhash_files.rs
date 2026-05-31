@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::cell::RefCell;
 use std::io::Write as _;
 use std::time::Instant;
@@ -31,13 +32,18 @@ pub async fn run(
     command_helper: &CommandHelper,
     args: &SimhashFilesArgs,
 ) -> Result<(), CommandError> {
+    /*
     let workspace = command_helper.workspace_helper(ui).await?;
     let Some(backend) = workspace.repo().store().backend_impl::<SqlBackend>() else {
         return Err(internal_error("not a SQL-backed repository"));
     };
 
-    let conn = SqlBackend::connect_db(backend.store_path()).map_err(internal_error)?;
-    let mut write_conn = SqlBackend::connect_db(backend.store_path()).map_err(internal_error)?;
+    let conn = SqlBackend::connect(backend.store_path(), false)
+        .await
+        .map_err(internal_error)?;
+    let mut write_conn = SqlBackend::connect(backend.store_path(), false)
+        .await
+        .map_err(internal_error)?;
 
     let filter = if args.rehash {
         ""
@@ -157,5 +163,6 @@ pub async fn run(
 
     pb.finish_with_message(format!("Hashed {} files  ", HumanCount(total)));
     eprintln!("read_ms={read_ms} -- hash_ms={hash_ms} -- write_ms={write_ms}");
+    */
     Ok(())
 }

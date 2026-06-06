@@ -50,7 +50,6 @@ use futures::io::AllowStdIo;
 use itertools::EitherOrBoth;
 use itertools::Itertools as _;
 use once_cell::unsync::OnceCell;
-use pollster::FutureExt as _;
 use prost::Message as _;
 use rayon::iter::IntoParallelIterator as _;
 use rayon::prelude::IndexedParallelIterator as _;
@@ -997,6 +996,7 @@ pub struct TreeState {
     sparse_patterns: Vec<RepoPathBuf>,
     own_mtime: MillisSinceEpoch,
     symlink_support: bool,
+    rt_handle: Option<tokio::runtime::Handle>,
 
     /// The most recent clock value returned by Watchman. Will only be set if
     /// the repo is configured to use the Watchman filesystem monitor and
@@ -1079,6 +1079,7 @@ impl TreeState {
             sparse_patterns: vec![RepoPathBuf::root()],
             own_mtime: MillisSinceEpoch(0),
             symlink_support: check_symlink_support().unwrap_or(false),
+            rt_handle: tokio::runtime::Handle::try_current().ok(),
             watchman_clock: None,
             conflict_marker_style: *conflict_marker_style,
             exec_policy,
@@ -1557,9 +1558,11 @@ impl FileSnapshotter<'_> {
             // sequential scan should be fast enough.
             .with_min_len(100)
             .filter_map(|entry| {
-                self.process_dir_entry(&dir, &git_ignore, file_states, &entry, scope)
-                    .block_on()
-                    .transpose()
+                block_on(
+                    &self.tree_state.rt_handle,
+                    self.process_dir_entry(&dir, &git_ignore, file_states, &entry, scope),
+                )
+                .transpose()
             })
             .map(|item| match item {
                 Ok((PresentDirEntryKind::Dir, name)) => Ok(Either::Left(name)),
@@ -1623,7 +1626,10 @@ impl FileSnapshotter<'_> {
                 // start_tracking_matcher is NOT tested here because we need to
                 // scan directory entries to report untracked paths.
                 self.spawn_ok(scope, move |_| {
-                    self.visit_tracked_files(file_states).block_on()
+                    block_on(
+                        &self.tree_state.rt_handle,
+                        self.visit_tracked_files(file_states),
+                    )
                 });
             } else if !self.matcher.visit(&path).is_nothing() {
                 let directory_to_visit = DirectoryToVisit {
@@ -2148,9 +2154,10 @@ impl TreeState {
 
     pub fn check_out(&mut self, new_tree: &MergedTree) -> Result<CheckoutStats, CheckoutError> {
         let old_tree = self.tree.clone();
-        let stats = self
-            .update(&old_tree, new_tree, self.sparse_matcher().as_ref())
-            .block_on()?;
+        let stats = block_on(
+            &self.rt_handle.clone(),
+            self.update(&old_tree, new_tree, self.sparse_matcher().as_ref()),
+        )?;
         self.tree = new_tree.clone();
         Ok(stats)
     }
@@ -2165,10 +2172,9 @@ impl TreeState {
         let added_matcher = DifferenceMatcher::new(&new_matcher, &old_matcher);
         let removed_matcher = DifferenceMatcher::new(&old_matcher, &new_matcher);
         let empty_tree = self.store.empty_merged_tree();
-        let added_stats = self.update(&empty_tree, &tree, &added_matcher).block_on()?;
-        let removed_stats = self
-            .update(&tree, &empty_tree, &removed_matcher)
-            .block_on()?;
+        let handle = self.rt_handle.clone();
+        let added_stats = block_on(&handle, self.update(&empty_tree, &tree, &added_matcher))?;
+        let removed_stats = block_on(&handle, self.update(&tree, &empty_tree, &removed_matcher))?;
         self.sparse_patterns = sparse_patterns;
         assert_eq!(added_stats.updated_files, 0);
         assert_eq!(added_stats.removed_files, 0);
@@ -2927,6 +2933,17 @@ impl LockedLocalWorkingCopy {
         self.wc.tree_state_mut()?.reset_watchman();
         self.tree_state_dirty = true;
         Ok(())
+    }
+}
+
+#[allow(clippy::ref_option)]
+fn block_on<F: Future>(handle: &Option<tokio::runtime::Handle>, f: F) -> F::Output {
+    match handle {
+        Some(handle) => match tokio::runtime::Handle::try_current() {
+            Ok(_) => tokio::task::block_in_place(|| handle.block_on(f)),
+            Err(_) => handle.block_on(f),
+        },
+        None => pollster::block_on(f),
     }
 }
 
